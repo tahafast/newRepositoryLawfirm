@@ -1,0 +1,4 @@
+uvicorn==0.34.0
+fastapi-socketio == 0.0.10
+fastapi==0.115.12
+dotenv==0.9.9
