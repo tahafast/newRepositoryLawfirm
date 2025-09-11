@@ -1,30 +1,37 @@
+from typing import Dict, Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.modules.router import router
-from core.conf import settings
-from version import build
+import logging
+from app.api.router import router
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="My Modular FastAPI App",
-    version="1.0.0",
-    docs_url="/docs" if settings.ENVIRONMENT == "dev" else None,
-    redoc_url="/redoc" if settings.ENVIRONMENT == "dev" else None,
-    openapi_url="/openapi.json" if settings.ENVIRONMENT == "dev" else None,
+    title="Law Firm Chatbot API",
 )
 
-# CORS
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=settings.CORS_EXPOSE_HEADERS,
 )
 
-# Register global router
-app.include_router(router, prefix=settings.FASTAPI_API_V1_PATH)
-
 @app.get("/")
-async def root():
-    return {"message": "Welcome to Law Firm Chatbot API!", "build": build}
+async def root() -> Dict[str, str]:
+    """Root endpoint with basic API information."""
+    logger.info("Root endpoint accessed")
+    return {"message": "Welcome to Law Firm Chatbot API", "version": "1.0.0"}
+
+# Health check endpoint
+@app.get("/health")
+async def health_check() -> Dict[str, str]:
+    """Health check endpoint for monitoring."""
+    return {"status": "healthy"}
+
+# Include router with prefix
+app.include_router(router, prefix="/api/v1")
