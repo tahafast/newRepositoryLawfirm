@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # OpenAI
     OPENAI_API_KEY: str
-
+    PROJECT_NAME: str 
     # CORS
     CORS_ALLOWED_ORIGINS: list[str] = [
         "http://127.0.0.1:8000",

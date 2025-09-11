@@ -1,11 +1,11 @@
 # Create a virtual environment
-python -m venv robi
+python -m venv myenv
 
 # Activate the virtual environment
 # On macOS/Linux
-source robi/bin/activate
+source myenv/bin/activate
 # On Windows
-.\robi\Scripts\activate
+.\myenv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
@@ -14,7 +14,7 @@ pip install -r requirements.txt
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 
 
-Robi_migration/
+Law Firm Chatbot/
 ├── app/
 │   ├── common/
 │   │   └── response/
@@ -26,6 +26,7 @@ Robi_migration/
 │       └── apollo/
 ├── core/
 │   └── conf.py
+│   └── logging_conf.py
 ├── database/
 │   └── mongodb.py
 ├── main.py
