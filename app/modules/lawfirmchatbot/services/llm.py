@@ -1,6 +1,6 @@
 from typing import List, Dict, Any
 from openai import AsyncOpenAI
-from core.conf import settings
+from core.config import settings
 
 
 _client: AsyncOpenAI | None = None

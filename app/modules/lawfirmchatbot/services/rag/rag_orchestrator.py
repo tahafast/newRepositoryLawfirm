@@ -4,12 +4,13 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 import logging
 
-from app.services.ingestion.document_processor import process_document
-from app.services.retrieval.vector_search import add_documents_to_vector_store, search_similar_documents
-from app.services.llm import chat_completion
-from app.schemas.query import QueryResponse, DebugInfo, DebugQueryAnalysis
-from app.modules.services.reranker import QueryComplexityAnalyzer, DocumentReranker
-from app.modules.services.adaptive_retrieval_service import AdaptiveRetrievalService
+from app.modules.lawfirmchatbot.services.ingestion.document_processor import process_document
+from app.modules.lawfirmchatbot.services.retrieval.vector_search import add_documents_to_vector_store, search_similar_documents, normalize_hits, build_user_prompt
+from app.modules.lawfirmchatbot.services.llm import chat_completion
+from app.modules.lawfirmchatbot.schema.query import QueryResponse, DebugInfo, DebugQueryAnalysis
+from app.modules.lawfirmchatbot.services.query_analyzer import QueryComplexityAnalyzer
+from app.modules.lawfirmchatbot.services.reranker import DocumentReranker
+from app.modules.lawfirmchatbot.services.adaptive_retrieval_service import AdaptiveRetrievalService
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +57,16 @@ class RAGOrchestrator:
     async def get_answer(self, query: str) -> QueryResponse:
         """Get answer for a query using enhanced RAG."""
         try:
-            if not self.current_document:
+            # Check if there are any documents in Qdrant (use Qdrant as source of truth)
+            from app.modules.lawfirmchatbot.services.vector_store import points_count, get_qdrant_client
+            
+            client = get_qdrant_client()
+            if points_count(client) <= 0:
                 return QueryResponse(
                     success=False,
                     answer="⚠️ No document has been uploaded yet. Please upload a document first.",
-                    metadata={"error": "no_document_uploaded"}
+                    metadata={"error": "no_document_uploaded"},
+                    debug_info=None
                 )
             
             # Analyze query
@@ -75,20 +81,9 @@ class RAGOrchestrator:
             if not initial_chunks:
                 return QueryResponse(
                     success=False,
-                    answer="⚠️ INFORMATION GAP: I couldn't find relevant information in the document for your query.",
-                    metadata={
-                        "document": self.current_document['name'],
-                        "chunks_retrieved": 0,
-                        "chunks_used": 0,
-                        "query_complexity": query_analysis['complexity_score'],
-                        "confidence": "LOW"
-                    },
-                    debug_info=DebugInfo(
-                        query_analysis=DebugQueryAnalysis(**query_analysis),
-                        retrieval_k=0,
-                        reranking_applied=False,
-                        total_pages=self.current_document['total_pages']
-                    )
+                    answer="I searched your knowledge base but couldn't find a relevant passage for that query.",
+                    metadata={"error": "no_relevant_context", "hits": 0},
+                    debug_info=None
                 )
             
             # Re-rank chunks
@@ -104,10 +99,36 @@ class RAGOrchestrator:
                 final_chunks, query_analysis
             )
             
+            # Convert chunks to contexts for multi-document support
+            raw_hits = []
+            for chunk in final_chunks:
+                # Create a mock hit object with payload
+                class MockHit:
+                    def __init__(self, chunk):
+                        self.payload = {
+                            "text": chunk.page_content,
+                            "metadata": chunk.metadata
+                        }
+                        self.score = chunk.metadata.get('similarity_score', 0.0)
+                        self.id = None
+                raw_hits.append(MockHit(chunk))
+            
+            contexts = normalize_hits(raw_hits)
+            if not contexts:
+                logger.warning("no usable contexts from chunks (chunks=%d)", len(final_chunks))
+                return QueryResponse(
+                    success=False,
+                    answer="I searched your knowledge base but couldn't find a relevant passage for that query.",
+                    metadata={"error": "no_relevant_context", "hits": len(final_chunks)},
+                    debug_info=None
+                )
+            
+            user_prompt = build_user_prompt(query, contexts[:8])  # cap context if needed
+            
             # Create messages for LLM
             messages = [
                 {"role": "system", "content": self._get_system_prompt()},
-                {"role": "user", "content": self._create_user_prompt(query, final_chunks)}
+                {"role": "user", "content": user_prompt}
             ]
             
             # Get LLM response
@@ -116,13 +137,28 @@ class RAGOrchestrator:
                 is_legal_query=query_analysis['is_legal_query']
             )
             
+            # Extract sources and page numbers from contexts
+            sources = list(set(c['source'] for c in contexts))
+            referenced_pages = []
+            for chunk in final_chunks:
+                page_num = chunk.metadata.get('page')
+                if page_num is not None and page_num not in referenced_pages:
+                    referenced_pages.append(page_num)
+            referenced_pages.sort()
+            
+            # Compute document name from sources (for backward compatibility)
+            document_name = sources[0] if sources else "multiple documents"
+            
             return QueryResponse(
                 success=True,
                 answer=answer,
                 metadata={
-                    "document": self.current_document['name'],
+                    "document": document_name,
+                    "sources": sources,
                     "chunks_retrieved": k,
                     "chunks_used": len(final_chunks),
+                    "referenced_pages": referenced_pages,
+                    "page_references": f"Pages: {', '.join(map(str, referenced_pages))}" if referenced_pages else "No page references available",
                     "query_complexity": query_analysis['complexity_score'],
                     "confidence": confidence_analysis['confidence'],
                     "confidence_score": confidence_analysis['score'],
@@ -134,7 +170,7 @@ class RAGOrchestrator:
                     query_analysis=DebugQueryAnalysis(**query_analysis),
                     retrieval_k=k,
                     reranking_applied=True,
-                    total_pages=self.current_document['total_pages']
+                    total_pages=len(referenced_pages) or 1  # fallback for compatibility
                 )
             )
             
@@ -154,6 +190,7 @@ RESPONSE FORMAT:
 ═══════════════════════════════════════
 📄 DOCUMENT: {document_name}
 🎯 QUERY TYPE: {query_type}
+📖 REFERENCE PAGES: {page_numbers}
 ═══════════════════════════════════════
 
 ANSWER:
@@ -172,9 +209,18 @@ CRITICAL: Only use information from the provided chunks. If information is not a
     def _create_user_prompt(self, query: str, chunks) -> str:
         """Create user prompt with chunks."""
         chunk_text = "\n\n".join([
-            f"[Page {chunk.metadata.get('page', '?')}]: {chunk.content}"
+            f"[Page {chunk.metadata.get('page', '?')}]: {chunk.page_content}"
             for chunk in chunks
         ])
+        
+        # Extract unique page numbers for reference
+        page_numbers = []
+        for chunk in chunks:
+            page_num = chunk.metadata.get('page')
+            if page_num is not None and page_num not in page_numbers:
+                page_numbers.append(page_num)
+        page_numbers.sort()
+        page_ref_text = ', '.join(map(str, page_numbers)) if page_numbers else 'Unknown'
         
         return f"""Document: {self.current_document['name']}
 Total Pages: {self.current_document['total_pages']}
@@ -184,7 +230,14 @@ RELEVANT CHUNKS:
 
 USER QUERY: {query}
 
-Please answer the query using only the information from the chunks above."""
+INSTRUCTIONS:
+- Answer using ONLY the information from the chunks above
+- Use the exact response format from the system prompt
+- Replace {{document_name}} with: {self.current_document['name']}
+- Replace {{query_type}} with the type of query this is
+- Replace {{page_numbers}} with: {page_ref_text}
+- Include specific page references in your supporting evidence
+- Be precise and cite the exact pages where you found information"""
 
 
 # Global orchestrator instance

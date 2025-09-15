@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: lawfirm_qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    networks:
+      - lawfirm_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Law Firm Chatbot API
+  lawfirm_api:
+    build: .
+    container_name: lawfirm_chatbot_api
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=dev
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=law_documents_enhanced
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LLM_MODEL=gpt-3.5-turbo
+      - EMBEDDING_MODEL=text-embedding-3-small
+    volumes:
+      - ./uploads:/app/uploads
+      - .:/app
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks:
+      - lawfirm_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  lawfirm_network:
+    driver: bridge
+
+volumes:
+  qdrant_storage:

@@ -11,6 +11,18 @@ class UploadedDocMeta(BaseModel):
     chunks_count: int
 
 
+class DocumentUploadRequest(BaseModel):
+    """Request model for document upload (handled via UploadFile in endpoint)."""
+    pass
+
+
+class DocumentUploadResponse(BaseModel):
+    """Response model for document upload - matches original contract."""
+    message: str
+    chunks: int
+    filename: str
+
+
 class DocumentChunk(BaseModel):
     content: str
     metadata: Dict[str, Any]
