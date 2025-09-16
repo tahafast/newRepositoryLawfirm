@@ -9,9 +9,7 @@
   <title>Chat</title>
   <link rel="stylesheet" href="./styles.css" />
   <style>
-    .api-banner{margin:8px 0;padding:8px 12px;border-radius:10px;background:#2a1120;border:1px solid #5f2746;color:#ffc9d9;display:none}
-    .api-banner.ok{display:none}
-    .api-banner.err{display:block}
+    .api-banner{display:none;margin:8px 0;padding:8px 12px;border-radius:10px;background:#2a1120;border:1px solid #5f2746;color:#ffc9d9}
   </style>
 </head>
 <body>
@@ -38,12 +36,11 @@
     </div>
   </div>
   <script type="module">
-    import { API_BASE, QUERY_ENDPOINT, postJSON, ping } from "./config.runtime.js?v=2025-09-16-1";
-    window.addEventListener("load", async ()=>{
+    import { API_BASE, QUERY_ENDPOINT, postJSON, ping } from "./config.runtime.js?v=2025-09-16-2";
+    (async()=>{
       const ok = await ping();
-      const b = document.getElementById("apiBanner");
-      if(b){ b.className = "api-banner " + (ok ? "ok" : "err"); b.textContent = ok ? "" : `⚠️ API unreachable at ${API_BASE}. Check Render service / CORS / env.`; }
-    });
+      if(!ok){ const b=document.getElementById("apiBanner"); b.style.display="block"; b.textContent=`⚠️ API unreachable at ${API_BASE}`; }
+    })();
     const historyEl = document.getElementById("history");
     const input = document.getElementById("q");
     const sendBtn = document.getElementById("send");
