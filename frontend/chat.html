@@ -3,8 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>Chat</title>
   <link rel="stylesheet" href="./styles.css" />
+  <style>
+    .api-banner{margin:8px 0;padding:8px 12px;border-radius:10px;background:#2a1120;border:1px solid #5f2746;color:#ffc9d9;display:none}
+    .api-banner.ok{display:none}
+    .api-banner.err{display:block}
+  </style>
 </head>
 <body>
   <!-- Note: If you get CORS errors, enable CORS in your FastAPI backend with allow_origins=["*"] for local testing -->
@@ -16,6 +24,7 @@
   </nav>
   <div class="wrap">
     <div class="card">
+      <div id="apiBanner" class="api-banner"></div>
       <h2>Chat</h2>
       <p class="muted">Ask questions. The backend will retrieve from Qdrant Cloud and generate an answer.</p>
       <div id="history" class="list" style="margin:12px 0 16px"></div>
@@ -29,7 +38,12 @@
     </div>
   </div>
   <script type="module">
-    import { QUERY_ENDPOINT, postJSON } from "./config.js";
+    import { API_BASE, QUERY_ENDPOINT, postJSON, ping } from "./config.runtime.js?v=2025-09-16-1";
+    window.addEventListener("load", async ()=>{
+      const ok = await ping();
+      const b = document.getElementById("apiBanner");
+      if(b){ b.className = "api-banner " + (ok ? "ok" : "err"); b.textContent = ok ? "" : `⚠️ API unreachable at ${API_BASE}. Check Render service / CORS / env.`; }
+    });
     const historyEl = document.getElementById("history");
     const input = document.getElementById("q");
     const sendBtn = document.getElementById("send");
