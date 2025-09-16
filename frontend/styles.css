@@ -1,0 +1,46 @@
+:root { --bg:#0b1320; --card:#121a2a; --text:#e8ecf1; --muted:#9fb0c3; --accent:#4da3ff; }
+*{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,Arial;background:var(--bg);color:var(--text)}
+a{color:var(--accent);text-decoration:none}
+.nav{display:flex;gap:16px;align-items:center;padding:14px 20px;background:#0e1728;position:sticky;top:0;border-bottom:1px solid #0f223a}
+.nav .spacer{flex:1}
+.wrap{max-width:860px;margin:24px auto;padding:0 16px}
+.card{background:var(--card);border:1px solid #23344f;border-radius:16px;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.row{display:flex;gap:12px;align-items:center}
+.btn{background:var(--accent);border:none;color:#051021;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:600}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+input[type="text"], input[type="url"], textarea, select{
+  width:100%;background:#0e1728;border:1px solid #22324c;color:var(--text);
+  padding:10px;border-radius:10px;outline:none
+}
+.muted{color:var(--muted);font-size:.9rem}
+.chip{display:inline-block;padding:2px 8px;border-radius:999px;background:#11233b;color:var(--muted);border:1px solid #234}
+.list{display:flex;flex-direction:column;gap:10px}
+.bubble{background:#0f1b2e;border:1px solid #22324c;border-radius:14px;padding:12px}
+.user{border-color:#345e9e}
+.assistant{border-color:#2f734d}
+pre{white-space:pre-wrap;word-wrap:break-word}
+footer{margin:32px 0;color:#8ba0b6;font-size:.85rem}
+
+/* Brand with logo */
+.brand { display:flex; align-items:center; gap:10px }
+.brand img { height:28px; filter:drop-shadow(0 2px 8px rgba(0,0,0,.3)) }
+.btn.secondary{background:#11233b;color:#cfe3ff;border:1px solid #234}
+
+/* Spinner */
+.spinner {
+  width:22px; height:22px; border-radius:50%;
+  border:3px solid #21324f; border-top-color:var(--accent);
+  animation:spin .8s linear infinite; display:inline-block; vertical-align:-4px;
+}
+@keyframes spin { to { transform:rotate(360deg) } }
+
+/* Typewriter stream for chat */
+.cursor {
+  display:inline-block; width:8px; height:1.1em; margin-left:3px;
+  background:var(--accent); animation:blink 1s steps(1) infinite;
+}
+@keyframes blink { 50%{opacity:0} }
+
+/* Cards polish */
+.card { transition:transform .2s ease, box-shadow .2s ease }
+.card:hover { transform:translateY(-1px); box-shadow:0 10px 34px rgba(0,0,0,.32) }

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ingest Documents</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!-- Note: If you get CORS errors, enable CORS in your FastAPI backend with allow_origins=["*"] for local testing -->
+  <nav class="nav">
+    <div class="brand"><img src="./logo.svg" alt="BRAG AI"/><strong>Law Firm RAG</strong></div>
+    <span class="spacer"></span>
+    <a href="./index.html">Home</a>
+    <a href="./chat.html">Chat</a>
+  </nav>
+  <div class="wrap">
+    <div class="card">
+      <h2>Upload documents</h2>
+      <p class="muted">Select one or more files (PDF, DOCX, TXT, etc.) to ingest into the knowledge base.</p>
+      <input id="fileInput" type="file" multiple />
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="btnUpload">Upload</button>
+        <span id="ingestSpinner" style="display:none"><span class="spinner"></span></span>
+        <span class="muted" id="status"></span>
+      </div>
+      <div style="margin-top:16px" class="list" id="result"></div>
+    </div>
+  </div>
+  <script type="module">
+    import { UPLOAD_ENDPOINT, postFormData } from "./config.js";
+    const statusEl = document.getElementById("status");
+    const resultEl = document.getElementById("result");
+    const spinner = document.getElementById("ingestSpinner");
+    const toggle = (on)=>{ spinner.style.display = on ? "inline-block" : "none"; btn.disabled = on; };
+    const btn = document.getElementById("btnUpload");
+    btn.onclick = async () => {
+      const files = document.getElementById("fileInput").files;
+      if (!files || files.length === 0) { alert("Pick at least one file"); return; }
+      statusEl.textContent = "Preparing upload..."; toggle(true); resultEl.innerHTML = "";
+      const tryBatch = async () => { const fd = new FormData(); [...files].forEach(f => fd.append("files", f)); return postFormData(UPLOAD_ENDPOINT, fd); };
+      const trySequential = async () => { let out=[]; for (const f of files){ const fd=new FormData(); fd.append("file", f); out.push(await postFormData(UPLOAD_ENDPOINT, fd)); } return { results: out }; };
+      try {
+        statusEl.textContent = "Uploading... this may take a minute for large PDFs.";
+        let data; try { data = await tryBatch(); } catch { data = await trySequential(); }
+        statusEl.textContent = "Ingestion complete.";
+        const pretty = document.createElement("pre"); pretty.textContent = JSON.stringify(data, null, 2); resultEl.appendChild(pretty);
+      } catch (e) {
+        statusEl.textContent = "Error."; const err = document.createElement("pre"); err.textContent = String(e?.message || e); err.className="bubble"; resultEl.appendChild(err);
+      } finally { toggle(false); }
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chat</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!-- Note: If you get CORS errors, enable CORS in your FastAPI backend with allow_origins=["*"] for local testing -->
+  <nav class="nav">
+    <div class="brand"><img src="./logo.svg" alt="BRAG AI"/><strong>Law Firm RAG</strong></div>
+    <span class="spacer"></span>
+    <a href="./index.html">Home</a>
+    <a href="./ingest.html">Ingest</a>
+  </nav>
+  <div class="wrap">
+    <div class="card">
+      <h2>Chat</h2>
+      <p class="muted">Ask questions. The backend will retrieve from Qdrant Cloud and generate an answer.</p>
+      <div id="history" class="list" style="margin:12px 0 16px"></div>
+      <div class="row">
+        <input id="q" type="text" placeholder="Type your question..." />
+        <button class="btn" id="send">Send</button>
+      </div>
+      <div style="margin-top:12px" class="muted">
+        Endpoint: <span class="chip" id="apiInfo"></span>
+      </div>
+    </div>
+  </div>
+  <script type="module">
+    import { QUERY_ENDPOINT, postJSON } from "./config.js";
+    const historyEl = document.getElementById("history");
+    const input = document.getElementById("q");
+    const sendBtn = document.getElementById("send");
+    document.getElementById("apiInfo").textContent = `POST ${QUERY_ENDPOINT}`;
+
+    const key = "rag_chat_history_v1";
+    const load = () => JSON.parse(localStorage.getItem(key) || "[]");
+    const save = (arr) => localStorage.setItem(key, JSON.stringify(arr));
+    const render = () => {
+      historyEl.innerHTML = "";
+      for (const m of load()) {
+        const div = document.createElement("div");
+        div.className = `bubble ${m.role === "user" ? "user" : "assistant"}`;
+        div.innerHTML = `<strong>${m.role}</strong><br><pre>${m.content}</pre>`;
+        historyEl.appendChild(div);
+      }
+      historyEl.scrollTop = historyEl.scrollHeight;
+    };
+
+    function streamAppend(container, fullText, speed=14) {
+      container.innerHTML = ""; const pre = document.createElement("pre"); container.appendChild(pre);
+      const cur = document.createElement("span"); cur.className="cursor"; container.appendChild(cur);
+      let i=0;
+      return new Promise(resolve=>{
+        const tick = () => {
+          // add chunk to reduce reflow
+          const chunk = fullText.slice(i, i+Math.max(1, Math.floor(fullText.length/200)));
+          pre.textContent += chunk; i += chunk.length;
+          historyEl.scrollTop = historyEl.scrollHeight;
+          if (i < fullText.length) setTimeout(tick, speed);
+          else { cur.remove(); resolve(); }
+        }; tick();
+      });
+    }
+
+    async function ask() {
+      const q = input.value.trim(); if (!q) return;
+      input.value = ""; sendBtn.disabled = true;
+      const messages = load(); messages.push({ role:"user", content:q }); save(messages); render();
+      // placeholder assistant bubble
+      const bubble = document.createElement("div"); bubble.className = "bubble assistant"; bubble.innerHTML = "<strong>assistant</strong><br>";
+      const holder = document.createElement("div"); bubble.appendChild(holder); historyEl.appendChild(bubble); historyEl.scrollTop = historyEl.scrollHeight;
+      try {
+        const res = await postJSON(QUERY_ENDPOINT, { query:q });
+        const content = (res && (res.answer || res.response || JSON.stringify(res))) || "No response";
+        await streamAppend(holder, content);
+        messages.push({ role:"assistant", content }); save(messages);
+      } catch(e) {
+        await streamAppend(holder, `Error: ${e?.message || e}`);
+        messages.push({ role:"assistant", content:`Error: ${e?.message || e}`}); save(messages);
+      } finally { render(); sendBtn.disabled=false; }
+    }
+
+    sendBtn.onclick = ask;
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") ask(); });
+    render();
+  </script>
+</body>
+</html>
