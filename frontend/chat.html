@@ -11,6 +11,51 @@
   <style>
     .api-banner{display:none;margin:8px 0;padding:8px 12px;border-radius:10px;background:#2a1120;border:1px solid #5f2746;color:#ffc9d9}
   </style>
+
+  <script type="module">
+    // ===== Inline, cache-proof API utils (no external config files) =====
+    const sanitize = v => (v||"").toString().trim().replace(/\/+$/,"");
+    const isHttpUrl = v => { try { const u=new URL(v); return /^https?:$/.test(u.protocol); } catch { return false; } };
+
+    // Same-origin base (works on Render), with optional LS override (for local dev)
+    const ORIGIN = (typeof location!=="undefined" && /^https?:$/.test(location.protocol)) ? sanitize(location.origin) : "";
+    let fromLS = ""; try { fromLS = sanitize(localStorage.getItem("API_BASE")); } catch {}
+    const onRender = typeof location!=="undefined" && /onrender\.com$/i.test(location.hostname);
+    const badHost  = h => /(localhost|127\.0\.0\.1|0\.0\.0\.0)/i.test(h||"");
+    if (fromLS && (!isHttpUrl(fromLS) || (onRender && badHost(fromLS)))) { try { localStorage.removeItem("API_BASE"); } catch {} fromLS=""; }
+
+    export const API_BASE = sanitize(fromLS || ORIGIN || "http://127.0.0.1:8000");
+    export const UPLOAD_ENDPOINT = `${API_BASE}/api/v1/lawfirm/upload-document`;
+    export const QUERY_ENDPOINT  = `${API_BASE}/api/v1/lawfirm/query`;
+    const HEALTH_ENDPOINT        = `${API_BASE}/healthz`;
+
+    export async function ping(){ try { const r = await fetch(HEALTH_ENDPOINT,{method:"GET",mode:"cors"}); return r.ok; } catch { return false; } }
+    export async function postJSON(url, body){
+      const res  = await fetch(url,{ method:"POST", mode:"cors", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+      const text = await res.text(); let data; try{ data=JSON.parse(text) }catch{ data={ error:text } }
+      if (!res.ok) throw new Error(data?.error || data?.detail || `${res.status} ${res.statusText}`);
+      return data;
+    }
+    export async function postFormData(url, fd){
+      const res  = await fetch(url,{ method:"POST", mode:"cors", body: fd });
+      const text = await res.text(); let data; try{ data=JSON.parse(text) }catch{ data={ error:text } }
+      if (!res.ok) throw new Error(data?.error || data?.detail || `${res.status} ${res.statusText}`);
+      return data;
+    }
+
+    // Debug banner so you know instantly if API is reachable & which base is used
+    window.addEventListener("DOMContentLoaded", async () => {
+      const b = document.getElementById("apiBanner");
+      if (b) {
+        const ok = await ping();
+        if (!ok) { b.style.display="block"; b.textContent = `⚠️ API unreachable at ${API_BASE}`; }
+      }
+      // Optional: quick console helpers
+      console.log("[BRAG] API_BASE:", API_BASE);
+      // window.__API_BASE__ = API_BASE;
+    });
+    // ===== End inline API utils =====
+  </script>
 </head>
 <body>
   <!-- Note: If you get CORS errors, enable CORS in your FastAPI backend with allow_origins=["*"] for local testing -->
@@ -36,14 +81,6 @@
     </div>
   </div>
   <script type="module">
-    import {
-      API_BASE, ping,
-      postJSON, postFormData,
-      UPLOAD_ENDPOINT, QUERY_ENDPOINT
-    } from "./config.runtime.js?v=2025-09-16-3";
-    // Optional banner to spot connectivity instantly:
-    const b = document.getElementById("apiBanner");
-    if (b) (async()=>{ if(!(await ping())){ b.style.display="block"; b.textContent=`⚠️ API unreachable at ${API_BASE}`; }})();
     const historyEl = document.getElementById("history");
     const input = document.getElementById("q");
     const sendBtn = document.getElementById("send");
