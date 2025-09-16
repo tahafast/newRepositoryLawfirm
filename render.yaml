@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: brag-legal-api
+    env: python
+    plan: free         # or starter
+    region: oregon     # pick your region
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /openapi.json
+    autoDeploy: true
+    envVars:
+      - key: SERVE_FRONTEND
+        value: "1"             # serves /ui from ./frontend
+      - key: LOG_LEVEL
+        value: INFO
+      # === Qdrant Cloud (fill these in the dashboard as "From dashboard" if you prefer secrets) ===
+      - key: QDRANT_MODE
+        value: cloud
+      - key: QDRANT_URL         # e.g. https://xxxx-xxx.gcp.cloud.qdrant.io
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION
+        value: law_docs_v1
+      - key: QDRANT_COLLECTION_ALIAS
+        value: law_docs_v1
+      - key: QDRANT_VECTOR_NAME
+        value: ""               # or "text" if you use a named vector
