@@ -52,6 +52,17 @@ def create_app():
 app = create_app()
 
 
+@app.middleware("http")
+async def _no_cache_ui(request, call_next):
+    resp = await call_next(request)
+    p = request.url.path
+    if p.startswith("/ui/config") or p.endswith("/chat.html") or p.endswith("/ingest.html"):
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
+
 @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 async def root():
     # Redirect root to static UI if present, otherwise return a tiny OK
