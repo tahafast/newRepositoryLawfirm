@@ -18,17 +18,13 @@ def create_app():
     wire_services(app)
     app.include_router(modules_router)
 
-    # --- CORS (allow local static servers & file:// testing) ---
-    allow_origins = os.getenv("CORS_ALLOW_ORIGINS", "*")
-    origins = ["*"] if allow_origins.strip() == "*" else [o.strip() for o in allow_origins.split(",") if o.strip()]
+    # --- BASIC CORS (safe even on same-origin) ---
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=origins,          # e.g. ["http://127.0.0.1:5500","http://localhost:5173","*"]
-        allow_credentials=True,
+        allow_origins=["*"],   # OK because we don't do cookies here
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["*"],
-        max_age=86400,
     )
 
     # --- Optional: serve the frontend from FastAPI to avoid CORS completely ---
@@ -52,11 +48,12 @@ def create_app():
 app = create_app()
 
 
+# --- no-cache for UI HTML (prevents browsers/CDNs from serving stale pages) ---
 @app.middleware("http")
 async def _no_cache_ui(request, call_next):
     resp = await call_next(request)
     p = request.url.path
-    if p.startswith("/ui/config") or p.endswith("/chat.html") or p.endswith("/ingest.html"):
+    if p.endswith("/ui/chat.html") or p.endswith("/ui/ingest.html"):
         resp.headers["Cache-Control"] = "no-store"
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
@@ -72,9 +69,10 @@ async def root():
     return PlainTextResponse("ok", status_code=200)
 
 
-@app.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
-async def healthz():
-    return PlainTextResponse("ok", status_code=200)
+# --- tiny health route for the UI ping ---
+@app.get("/healthz")
+async def _healthz():
+    return {"ok": True}
 
 
 @app.on_event("startup")
