@@ -3,6 +3,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse, PlainTextResponse
 from core.config import settings, wire_services, perform_warmup
 from core.logging_conf import logging  # side-effect: configures logging
 from app.modules.router import router as modules_router
@@ -45,6 +46,17 @@ def create_app():
 
 
 app = create_app()
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    # Redirect root to the static UI (avoids 404 on HEAD /)
+    return RedirectResponse(url="/ui/")
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    return PlainTextResponse("ok")
 
 
 @app.on_event("startup")
