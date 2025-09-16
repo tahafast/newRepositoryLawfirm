@@ -1,5 +1,7 @@
 # app/main.py
 import os
+import logging
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -33,12 +35,14 @@ def create_app():
     # Set SERVE_FRONTEND=1 (default) to mount /ui -> ./frontend
     if os.getenv("SERVE_FRONTEND", "1") == "1":
         # mounting at /ui ensures /api/* keeps working
-        app.mount("/ui", StaticFiles(directory="frontend", html=True), name="frontend")
+        FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
+        if FRONTEND_DIR.exists():
+            app.mount("/ui", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
     
     # (append in app/main.py after include_router)
     for r in app.routes:
         try:
-            logging.getLogger("router.map").info("ROUTE %s %s", ",".join(r.methods or []), r.path)
+            logging.getLogger("router.map").info("ROUTE %s %s", ",".join(sorted(r.methods or [])), r.path)
         except Exception:
             pass
     
@@ -48,15 +52,18 @@ def create_app():
 app = create_app()
 
 
-@app.get("/", include_in_schema=False)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 async def root():
-    # Redirect root to the static UI (avoids 404 on HEAD /)
-    return RedirectResponse(url="/ui/")
+    # Redirect root to static UI if present, otherwise return a tiny OK
+    FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
+    if FRONTEND_DIR.exists():
+        return RedirectResponse(url="/ui/")
+    return PlainTextResponse("ok", status_code=200)
 
 
-@app.get("/healthz", include_in_schema=False)
+@app.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
 async def healthz():
-    return PlainTextResponse("ok")
+    return PlainTextResponse("ok", status_code=200)
 
 
 @app.on_event("startup")
