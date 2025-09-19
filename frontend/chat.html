@@ -88,10 +88,16 @@
       const holder = document.createElement("div"); bubble.appendChild(holder); historyEl.appendChild(bubble); historyEl.scrollTop = historyEl.scrollHeight;
       try {
         const res = await postJSON(QUERY_ENDPOINT, { query:q });
-        const content = (res && (res.answer || res.response || JSON.stringify(res))) || "No response";
-        await streamAppend(holder, content);
-        messages.push({ role:"assistant", content }); save(messages);
+        if (res && res.success === false) {
+          await streamAppend(holder, `⚠️ ${res.answer}`);
+          messages.push({ role:"assistant", content:res.answer }); save(messages);
+        } else {
+          const content = res?.answer || "No response";
+          await streamAppend(holder, content);
+          messages.push({ role:"assistant", content }); save(messages);
+        }
       } catch(e) {
+        console.error("Query error:", e);
         await streamAppend(holder, `Error: ${e?.message || e}`);
         messages.push({ role:"assistant", content:`Error: ${e?.message || e}`}); save(messages);
       } finally { render(); sendBtn.disabled=false; }

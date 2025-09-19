@@ -35,6 +35,16 @@ async def query_document(
     services: Services = Depends(get_legacy_services)
 ) -> QueryResponse:
     """Process a query against the uploaded documents."""
-    return await process_document_query(req, services)
+    logger.info(f"Received query request: {req.query}")
+    try:
+        response = await process_document_query(req, services)
+        logger.info("Query processed successfully")
+        return response
+    except Exception as e:
+        logger.error(f"Error processing query: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"success": False, "answer": str(e), "metadata": {}}
+        )
 
 
