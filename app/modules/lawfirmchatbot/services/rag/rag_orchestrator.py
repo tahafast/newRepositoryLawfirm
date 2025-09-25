@@ -91,30 +91,38 @@ class RAGOrchestrator:
                 query, initial_chunks, query_analysis
             )
             
-            # Limit final chunks
-            final_chunks = reranked_chunks[:min(len(reranked_chunks), 8)]
+            # Limit final chunks to keep cost down
+            top_k = min(4, len(reranked_chunks))  # Cap at 4 chunks to control cost
+            final_chunks = reranked_chunks[:top_k]
             
             # Calculate confidence
             confidence_analysis = self.retrieval_service.calculate_advanced_confidence(
                 final_chunks, query_analysis
             )
             
-            # Convert chunks to contexts for multi-document support
-            raw_hits = []
-            for chunk in final_chunks:
-                # Create a mock hit object with payload
-                class MockHit:
-                    def __init__(self, chunk):
-                        self.payload = {
-                            "text": chunk.page_content,
-                            "metadata": chunk.metadata
-                        }
-                        self.score = chunk.metadata.get('similarity_score', 0.0)
-                        self.id = None
-                raw_hits.append(MockHit(chunk))
+            # Collect page numbers from retrieved chunks
+            pages = []
+            for ch in final_chunks:
+                p = None
+                # Check common metadata keys for page numbers
+                for key in ("page", "page_number", "pageIndex", "page_index"):
+                    if key in ch.metadata:
+                        p = ch.metadata[key]
+                        break
+                if isinstance(p, (int, float)) and p not in pages:
+                    pages.append(int(p))
+            # Keep a short, sorted page list
+            pages = sorted(pages)[:12]
             
-            contexts = normalize_hits(raw_hits)
-            if not contexts:
+            # Build numbered context for citations
+            numbered_context = []
+            for i, ch in enumerate(final_chunks, start=1):
+                src = ch.metadata.get("source") or ch.metadata.get("document") or "Source"
+                _page = ch.metadata.get("page") or ch.metadata.get("page_number") or ch.metadata.get("page_index")
+                header = f"[{i}] {src}" + (f", page {int(_page)}" if isinstance(_page, (int, float)) else "")
+                numbered_context.append(f"{header}\n{ch.page_content}")
+            
+            if not numbered_context:
                 logger.warning("no usable contexts from chunks (chunks=%d)", len(final_chunks))
                 return QueryResponse(
                     success=False,
@@ -123,7 +131,16 @@ class RAGOrchestrator:
                     debug_info=None
                 )
             
-            user_prompt = build_user_prompt(query, contexts[:8])  # cap context if needed
+            # Build user prompt with numbered snippets for citations
+            user_prompt = f"""Question: {query}
+
+Context (numbered):
+{chr(10).join(numbered_context)}
+
+Instructions:
+- Use only the numbered context.
+- Use Markdown and include '## Answer', '## Key Points', and '## Supporting Evidence'.
+- Keep evidence concise (2–4 bullets) with inline citations [n] matching the numbered context."""
             
             # Create messages for LLM
             messages = [
@@ -137,14 +154,11 @@ class RAGOrchestrator:
                 is_legal_query=query_analysis['is_legal_query']
             )
             
-            # Extract sources and page numbers from contexts
-            sources = list(set(c['source'] for c in contexts))
-            referenced_pages = []
-            for chunk in final_chunks:
-                page_num = chunk.metadata.get('page')
-                if page_num is not None and page_num not in referenced_pages:
-                    referenced_pages.append(page_num)
-            referenced_pages.sort()
+            # Extract sources for backward compatibility
+            sources = list({
+                (ch.metadata.get("source") or ch.metadata.get("document") or "Source")
+                for ch in final_chunks
+            })
             
             # Compute document name from sources (for backward compatibility)
             document_name = sources[0] if sources else "multiple documents"
@@ -157,8 +171,8 @@ class RAGOrchestrator:
                     "sources": sources,
                     "chunks_retrieved": k,
                     "chunks_used": len(final_chunks),
-                    "referenced_pages": referenced_pages,
-                    "page_references": f"Pages: {', '.join(map(str, referenced_pages))}" if referenced_pages else "No page references available",
+                    "referenced_pages": pages,  # Use the collected pages
+                    "page_references": f"Pages: {', '.join(map(str, pages))}" if pages else "No page references available",
                     "query_complexity": query_analysis['complexity_score'],
                     "confidence": confidence_analysis['confidence'],
                     "confidence_score": confidence_analysis['score'],
@@ -170,7 +184,7 @@ class RAGOrchestrator:
                     query_analysis=DebugQueryAnalysis(**query_analysis),
                     retrieval_k=k,
                     reranking_applied=True,
-                    total_pages=len(referenced_pages) or 1  # fallback for compatibility
+                    total_pages=len(pages) or 1  # fallback for compatibility
                 )
             )
             
@@ -184,27 +198,21 @@ class RAGOrchestrator:
 
     def _get_system_prompt(self) -> str:
         """Get system prompt for LLM."""
-        return """You are an advanced document analysis AI. Provide accurate, well-cited responses based solely on the provided document chunks.
+        return """You are a legal RAG assistant. Answer **only** from the supplied context.
+- If the context is insufficient, say you don't have enough information.
+- Write clean Markdown with headings and spacing.
+- Keep "Supporting Evidence" to 2–4 concise bullets with inline citations like [1], [2].
+- Do not invent facts or pages not present in the context.
 
-RESPONSE FORMAT:
-═══════════════════════════════════════
-📄 DOCUMENT: {document_name}
-🎯 QUERY TYPE: {query_type}
-📖 REFERENCE PAGES: {page_numbers}
-═══════════════════════════════════════
+Format:
+## Answer
+<2–4 short paragraphs (150–250 words total), with subheadings when helpful>
 
-ANSWER:
-{your_detailed_answer}
+## Key Points
+- <3–5 bullets summarizing the answer>
 
-SUPPORTING EVIDENCE:
-• [Page X]: "{relevant_quote}"
-
-CONFIDENCE ASSESSMENT:
-• Overall: {HIGH/MEDIUM/LOW}
-• Rationale: {explanation}
-═══════════════════════════════════════
-
-CRITICAL: Only use information from the provided chunks. If information is not available, clearly state this."""
+## Supporting Evidence
+- <2–4 bullets, each maps to provided context and cites [n]>"""
 
     def _create_user_prompt(self, query: str, chunks) -> str:
         """Create user prompt with chunks."""

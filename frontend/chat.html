@@ -8,10 +8,17 @@
   <meta http-equiv="Expires" content="0" />
   <title>Chat</title>
   <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     .api-banner{margin:8px 0;padding:8px 12px;border-radius:10px;background:#2a1120;border:1px solid #5f2746;color:#ffc9d9;display:none}
     .api-banner.ok{display:none}
     .api-banner.err{display:block}
+    .assistant-card h2, .assistant-card h3 { margin: 12px 0 8px; }
+    .assistant-card p { margin: 8px 0; line-height: 1.5; }
+    .assistant-card ul { margin: 8px 0 8px 18px; }
+    .meta-row { margin: 6px 0; font-size: 0.92rem; opacity: 0.9; }
+    .bubble.assistant { position: relative; }
+    .bubble.assistant .answer-content { margin-bottom: 8px; }
   </style>
 </head>
 <body>
@@ -57,7 +64,23 @@
       for (const m of load()) {
         const div = document.createElement("div");
         div.className = `bubble ${m.role === "user" ? "user" : "assistant"}`;
-        div.innerHTML = `<strong>${m.role}</strong><br><pre>${m.content}</pre>`;
+        if (m.role === "assistant" && m.isMarkdown) {
+          // Render markdown for assistant responses
+          div.innerHTML = `<strong>${m.role}</strong><br><div class="assistant-card answer-content"></div>`;
+          const answerBox = div.querySelector('.answer-content');
+          const html = marked.parse(m.content);
+          answerBox.innerHTML = html;
+          
+          // Add reference pages if available
+          if (m.referencedPages && m.referencedPages.length > 0) {
+            const metaDiv = document.createElement("div");
+            metaDiv.className = "meta-row";
+            metaDiv.innerHTML = `<span id="refPages">REFERENCE PAGES: ${m.referencedPages.join(", ")}</span>`;
+            div.appendChild(metaDiv);
+          }
+        } else {
+          div.innerHTML = `<strong>${m.role}</strong><br><pre>${m.content}</pre>`;
+        }
         historyEl.appendChild(div);
       }
       historyEl.scrollTop = historyEl.scrollHeight;
@@ -93,8 +116,19 @@
           messages.push({ role:"assistant", content:res.answer }); save(messages);
         } else {
           const content = res?.answer || "No response";
+          const pages = res?.metadata?.referenced_pages;
+          
+          // For streaming, we'll show plain text, then replace with markdown on render
           await streamAppend(holder, content);
-          messages.push({ role:"assistant", content }); save(messages);
+          
+          // Save with markdown flag and reference pages
+          messages.push({ 
+            role:"assistant", 
+            content,
+            isMarkdown: true,
+            referencedPages: Array.isArray(pages) && pages.length > 0 ? pages : null
+          }); 
+          save(messages);
         }
       } catch(e) {
         console.error("Query error:", e);
