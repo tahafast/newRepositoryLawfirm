@@ -71,11 +71,18 @@
           const html = marked.parse(m.content);
           answerBox.innerHTML = html;
           
-          // Add reference pages if available
-          if (m.referencedPages && m.referencedPages.length > 0) {
+          // Add reference pages and document name if available
+          const pagesText = (m.referencedPages && m.referencedPages.length > 0)
+            ? m.referencedPages.join(", ")
+            : null;
+          const docText = m.documentName || null;
+          if (pagesText || docText) {
             const metaDiv = document.createElement("div");
             metaDiv.className = "meta-row";
-            metaDiv.innerHTML = `<span id="refPages">REFERENCE PAGES: ${m.referencedPages.join(", ")}</span>`;
+            const rows = [];
+            if (pagesText) rows.push(`<div><span id="refPages">REFERENCE PAGES: ${pagesText}</span></div>`);
+            if (docText) rows.push(`<div><span id="docName">DOCUMENT: ${docText}</span></div>`);
+            metaDiv.innerHTML = rows.join("");
             div.appendChild(metaDiv);
           }
         } else {
@@ -117,6 +124,7 @@
         } else {
           const content = res?.answer || "No response";
           const pages = res?.metadata?.referenced_pages;
+          const doc = res?.metadata?.document;
           
           // For streaming, we'll show plain text, then replace with markdown on render
           await streamAppend(holder, content);
@@ -126,7 +134,8 @@
             role:"assistant", 
             content,
             isMarkdown: true,
-            referencedPages: Array.isArray(pages) && pages.length > 0 ? pages : null
+            referencedPages: Array.isArray(pages) && pages.length > 0 ? pages : null,
+            documentName: doc || null
           }); 
           save(messages);
         }
