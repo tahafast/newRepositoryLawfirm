@@ -1,35 +1,225 @@
-/* ===== BRAG AI (LEGAL) – Light Theme Redesign =====
-   Only CSS changes. No HTML/JS IDs/classes changed so functionality remains intact.
-   Palette: soft-light neutrals + brand blue accents
-   Typography: Inter (fallbacks: system UI)
-   ------------------------------------------------- */
-
+/* ===== THEME VARIABLES (single source of truth) ===== */
 :root{
-  /* brand */
+  /* LIGHT — baby-blue look */
+  --bg:       #eaf3ff;   /* page background */
+  --bg-grad1: rgba(255,255,255,.85);
+  --bg-grad2: rgba(255,255,255,.65);
+
+  --panel:    #ffffff;   /* cards, panels, inputs */
+  --border:   #dde6f3;
+  --text:     #1f2a37;
+  --muted:    #5c6a7a;
+
+  /* brand blues for buttons/links */
+  --brand-400:#5aa9ff;
+  --brand-500:#2b8bff;
+  --brand-600:#1e6fe0;
+  --brand-700:#1a5bb8;
+
+  --success:  #17a27e;
+  --warn:     #ff8a00;
+  --error:    #d64545;
+
+  --shadow:   0 8px 26px rgba(16, 24, 40, 0.08);
+  --r-sm: 10px; --r-md: 14px; --r-lg: 18px;
+}
+
+/* DARK — previous dark-blue look with clear contrast */
+:root[data-theme="dark"]{
+  --bg:       #0b1220;
+  --bg-grad1: transparent;  /* avoid milky wash */
+  --bg-grad2: transparent;  /* avoid milky wash */
+
+  --panel:    #151d2b;
+  --border:   #1f2a3a;
+  --text:     #e9f0fb;
+  --muted:    #9db0c8;
+
+  --brand-400:#294a86;
+  --brand-500:#3f7bd9;
+  --brand-600:#2d66c3;
+  --brand-700:#2050a8;
+
+  --success:  #34d399;
+  --warn:     #f59e0b;
+  --error:    #ef4444;
+
+  --shadow:   0 8px 26px rgba(0,0,0,.35);
+}
+
+/* Base reset */
+*{box-sizing:border-box}
+html, body { height: 100%; }
+body{
+  margin:0;
+  color: var(--text);
+  background:
+    radial-gradient(60% 60% at 90% 0%, var(--bg-grad1) 0%, transparent 70%),
+    radial-gradient(60% 60% at 0% 100%, var(--bg-grad2) 0%, transparent 70%),
+    var(--bg);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+}
+
+/* In dark mode, remove soft gradients to avoid any milky overlay */
+:root[data-theme="dark"] body{ background: var(--bg); }
+a{color:var(--brand-600);text-decoration:none}
+a:hover{color:var(--brand-700);text-decoration:underline}
+
+/* Topbar / nav (existing structure kept) */
+.nav, .navbar, header, .topbar{
+  position:sticky; top:0; z-index:10;
+  display:flex; align-items:center; gap:16px;
+  padding:16px 24px;
+  background:linear-gradient(180deg, var(--panel) 0%, rgba(0,0,0,.04) 100%);
+  border-bottom:1px solid var(--border);
+  box-shadow: 0 2px 10px rgba(16,24,40,.04);
+}
+
+/* Dark: keep topbar crisp and solid */
+:root[data-theme="dark"] .nav,
+:root[data-theme="dark"] .navbar,
+:root[data-theme="dark"] header,
+:root[data-theme="dark"] .topbar{ background: var(--panel); box-shadow: none; }
+.nav .spacer{flex:1}
+.brand{ display:flex; align-items:center; gap:10px }
+.brand img{ height:28px }
+.brand strong{ color: var(--text); text-shadow: 0 1px 0 rgba(255,255,255,.15) }
+
+/* Page container */
+.wrap, .container, .page-wrap, main{ max-width:1100px; margin:28px auto; padding:0 20px }
+
+/* Cards / panels */
+.card, .panel, .assistant-card, .user-card, .welcome-card, .upload-card,
+.section, .box, .response-card{
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:var(--r-lg);
+  box-shadow: var(--shadow);
+  padding:24px;
+  transition:transform .2s ease, box-shadow .2s ease;
+}
+.card:hover{ transform:translateY(-1px); box-shadow:0 12px 32px rgba(16,24,40,.10) }
+
+.row{display:flex;gap:12px;align-items:center}
+
+/* Buttons */
+.btn{background:var(--brand-500);border:none;color:#fff;padding:12px 18px;border-radius:12px;cursor:pointer;font-weight:700;box-shadow: 0 6px 18px rgba(43,139,255,.22);transition: transform .06s ease, box-shadow .2s ease, background .2s ease}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+.btn:hover{ background:var(--brand-600); transform: translateY(-1px) }
+.btn.secondary{background:#fff;color:var(--brand-700);border:1px solid var(--brand-200);box-shadow:none}
+
+/* Buttons - universal */
+button, .btn { border:1px solid var(--brand-600); background:var(--brand-500); color:#fff }
+button:hover, .btn:hover { background: var(--brand-600) }
+
+/* Inputs */
+input[type="text"], input[type="search"], input[type="file"], input[type="url"], textarea, select{
+  width:100%;background:var(--panel);border:1px solid var(--border);color:var(--text);
+  padding:12px 14px;border-radius:var(--r-md);outline:none;transition:border .15s ease, box-shadow .15s ease
+}
+input[type="text"]:focus, input[type="search"]:focus, input[type="file"]:focus, input[type="url"]:focus, textarea:focus, select:focus{
+  border-color:var(--brand-400);
+  box-shadow: 0 0 0 4px rgba(43,139,255,.15);
+}
+input::placeholder, textarea::placeholder { color: var(--muted); }
+
+.muted{color:var(--muted);font-size:.9rem}
+.chip{display:inline-block;padding:6px 10px;border-radius:999px;background:#f0f6ff;color:var(--brand-700);border:1px solid var(--border)}
+.list{display:flex;flex-direction:column;gap:12px}
+.bubble{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:14px; color: var(--text)}
+.user{border-left:5px solid var(--brand-400)}
+.assistant{border-left:5px solid var(--success)}
+/* Force dark-mode bubble surface so outer box isn't white */
+:root[data-theme="dark"] .bubble{ background:#0f1b2e; border-color:#22324c; color:var(--text) }
+:root[data-theme="dark"] .user{ border-left-color:#294a86 }
+:root[data-theme="dark"] .assistant{ border-left-color:#34d399 }
+.assistant-card, .user-card{ color: var(--text) }
+pre{ color: var(--text) }
+.user{border-left:5px solid var(--brand-400)}
+.assistant{border-left:5px solid var(--success)}
+pre{white-space:pre-wrap;word-wrap:break-word}
+footer{margin:32px 0;color:var(--muted);font-size:.85rem}
+
+/* Spinner */
+.spinner{ width:22px; height:22px; border-radius:50%; border:3px solid #e6eef7; border-top-color:var(--brand-500); animation:spin .8s linear infinite; display:inline-block; vertical-align:-4px }
+@keyframes spin { to { transform:rotate(360deg) } }
+
+/* Typewriter stream cursor */
+.cursor{ display:inline-block; width:8px; height:1.1em; margin-left:3px; background:var(--brand-500); animation:blink 1s steps(1) infinite }
+@keyframes blink { 50%{opacity:0} }
+
+/* Answer markdown typography */
+.assistant-card h2, .assistant-card h3{ margin:10px 0 6px }
+.assistant-card p{ margin:8px 0; line-height:1.6 }
+.assistant-card ul{ margin:8px 0 8px 20px }
+.assistant-card code{ background:#f3f6fb; padding:2px 6px; border-radius:8px }
+
+/* Dark mode: ensure inner answer box is darker (readable) */
+:root[data-theme="dark"] .assistant-card{ background:#0f1b2e; border:1px solid #22324c; color:var(--text) }
+:root[data-theme="dark"] .assistant-card h2,
+:root[data-theme="dark"] .assistant-card h3,
+:root[data-theme="dark"] .assistant-card p,
+:root[data-theme="dark"] .assistant-card li{ color:var(--text) }
+
+/* Endpoint pill */
+.endpoint-pill{ display:inline-block; padding:8px 12px; border-radius:999px; background:#f0f6ff; border:1px solid var(--brand-200); color:var(--brand-700); font-size:.9rem; box-shadow: inset 0 -2px 0 rgba(43,139,255,.07) }
+
+/* Status */
+.status{ display:inline-flex; gap:8px; align-items:center; padding:8px 10px; border-radius:10px; font-weight:600; font-size:.92rem }
+.status.ok{ background:#effaf6; color:#0b8f6b; border:1px solid #bde9dc }
+.status.warn{ background:#fff8eb; color:#b46418; border:1px solid #f5e2c2 }
+.status.err{ background:#ffefef; color:#b33d3d; border:1px solid #f0cbcb }
+
+/* Mobile */
+@media (max-width: 720px){
+  .nav, .navbar, header, .topbar{ padding:12px 16px }
+  .card, .panel{ padding:18px }
+}
+/* ===== THEME VARIABLES ===== */
+:root{
+  /* -------- LIGHT (baby blue) -------- */
   --brand-50:  #eef7ff;
   --brand-100: #d9ecff;
   --brand-200: #bfe0ff;
   --brand-300: #93caff;
   --brand-400: #5aa9ff;
-  --brand-500: #2b8bff;   /* primary */
+  --brand-500: #2b8bff;
   --brand-600: #1e6fe0;
   --brand-700: #1a5bb8;
 
-  /* neutrals */
-  --bg:        #f7fafc;   /* app background */
-  --card:      #ffffff;   /* cards & panels */
-  --border:    #e7edf3;
-  --muted:     #6b7a8c;   /* secondary text */
-  --text:      #1f2a37;   /* primary text */
-  --success:   #17a27e;
-  --warn:      #ff8a00;
-  --error:     #d64545;
-  --shadow:    0 8px 26px rgba(16, 24, 40, 0.08);
+  --bg:       #eaf3ff; /* baby-blue page background */
+  --panel:    #ffffff; /* cards/panels */
+  --border:   #e3ebf5;
+  --muted:    #5c6a7a;
+  --text:     #1f2a37;
+  --success:  #17a27e;
+  --warn:     #ff8a00;
+  --error:    #d64545;
+  --shadow:   0 8px 26px rgba(16, 24, 40, 0.08);
 
-  /* radii */
-  --r-sm: 10px;
-  --r-md: 14px;
-  --r-lg: 18px;
+  --r-sm: 10px; --r-md: 14px; --r-lg: 18px;
+}
+
+/* -------- DARK (previous dark-blue look) -------- */
+:root[data-theme="dark"]{
+  --brand-50:  #0f172a;
+  --brand-100: #0b1430;
+  --brand-200: #0d1b3a;
+  --brand-300: #1a2c55;
+  --brand-400: #294a86;
+  --brand-500: #3f7bd9;  /* accent for buttons/links */
+  --brand-600: #2d66c3;
+  --brand-700: #2050a8;
+
+  --bg:       #0b1220;  /* dark blue page */
+  --panel:    #151d2b;  /* card background */
+  --border:   #1f2a3a;
+  --muted:    #9db0c8;
+  --text:     #e9f0fb;
+  --success:  #34d399;
+  --warn:     #f59e0b;
+  --error:    #ef4444;
+  --shadow:   0 8px 26px rgba(0,0,0,.35);
 }
 
 /* Base reset */
@@ -60,7 +250,7 @@ a:hover{color:var(--brand-700);text-decoration:underline}
 
 /* Cards / panels */
 .card, .panel, .assistant-card, .user-card, .welcome-card, .upload-card{
-  background:var(--card);
+  background:var(--panel);
   border:1px solid var(--border);
   border-radius:var(--r-lg);
   box-shadow: var(--shadow);

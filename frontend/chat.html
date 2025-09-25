@@ -28,6 +28,7 @@
     <span class="spacer"></span>
     <a href="./index.html">Home</a>
     <a href="./ingest.html">Ingest</a>
+    <button id="themeToggle" aria-label="Toggle color theme"><span class="icon" aria-hidden="true">🌙</span><span class="label">Dark</span></button>
   </nav>
   <div class="wrap">
     <div class="card">
@@ -149,6 +150,41 @@
     sendBtn.onclick = ask;
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") ask(); });
     render();
+  </script>
+  <script>
+(function(){
+  const STORAGE_KEY = "BRAG_THEME";
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+  function paintToggle(mode){
+    const btn = document.getElementById('themeToggle'); if(!btn) return;
+    const icon = btn.querySelector('.icon'); const label = btn.querySelector('.label');
+    if(mode === 'dark'){ if(icon) icon.textContent='☀️'; if(label) label.textContent='Light'; btn.setAttribute('aria-pressed','true'); }
+    else { if(icon) icon.textContent='🌙'; if(label) label.textContent='Dark'; btn.setAttribute('aria-pressed','false'); }
+  }
+  function applyTheme(mode){
+    if(mode === 'dark') document.documentElement.setAttribute('data-theme','dark');
+    else document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem(STORAGE_KEY, mode); paintToggle(mode);
+  }
+  function currentTheme(){
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if(saved==='light'||saved==='dark') return saved;
+    return prefersDark ? 'dark' : 'light';
+  }
+  const initMode = currentTheme(); applyTheme(initMode);
+  document.addEventListener('click', (e)=>{
+    if(e.target.closest && e.target.closest('#themeToggle')){
+      const mode = currentTheme()==='dark' ? 'light' : 'dark'; applyTheme(mode);
+    }
+  });
+  if(window.matchMedia){
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (ev)=>{
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if(saved!=='light' && saved!=='dark') applyTheme(ev.matches?'dark':'light');
+    });
+  }
+})();
   </script>
 </body>
 </html>
