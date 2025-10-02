@@ -253,6 +253,7 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
         tuple: (documents, unique_sources, unique_pages)
     """
     try:
+        from core.config import settings
         client = get_qdrant()
         k = max(1, k)
         threshold = score_threshold or MIN_SCORE
@@ -260,19 +261,21 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
         ck = (nq, k, threshold)
         cached = _cache_get(ck)
         if cached is not None:
-            logger.info("vector_search cache hit top_k=%d", k)
+            if settings.DEBUG_RAG:  # RAG-DEBUG: Cache hit logging
+                logger.info(f"[RAG-DEBUG] vector_search cache hit: top_k={k}, threshold={threshold:.3f}")
             return cached
         
         # Generate query embedding
         query_embedding = await embed_text(nq)
         
-        # Light observability: before search
-        logger.info(f"vector_search start top_k={k}")
+        # RAG-DEBUG: Enhanced retrieval logging
+        if settings.DEBUG_RAG:
+            logger.info(f"[RAG-DEBUG] Starting retrieval: query='{query[:100]}...', top_k={k}, threshold={threshold:.3f}, timeout={settings.QDRANT_SEARCH_TIMEOUT_SECS}s")
         
         import time
         start_time = time.time()
         
-        # Search with timeout and score threshold (tightened to 3s)
+        # Search with timeout and score threshold
         results = search_similar(
             client=client,
             query_vector=query_embedding,
@@ -281,9 +284,12 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
             score_threshold=threshold
         )
         
-        # Light observability: after search
+        # Enhanced observability with debug details
         elapsed_ms = int((time.time() - start_time) * 1000)
-        logger.info(f"vector_search got hits={len(results or [])} in {elapsed_ms}ms")
+        if settings.DEBUG_RAG:
+            logger.info(f"[RAG-DEBUG] Qdrant search completed: hits={len(results or [])}, elapsed={elapsed_ms}ms")
+        else:
+            logger.info(f"vector_search got hits={len(results or [])} in {elapsed_ms}ms")
         
         # If no results, retry with lower threshold
         if not results:
@@ -300,20 +306,55 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
         raw_hits = results
         contexts = normalize_hits(raw_hits)
         
-        # Additional filtering: remove low-score entries and dedupe by document
+        # RAG-DEBUG: Log detailed chunk information
+        if settings.DEBUG_RAG and contexts:
+            logger.info(f"[RAG-DEBUG] Raw chunks retrieved: {len(contexts)}")
+            for i, ctx in enumerate(contexts[:10], 1):  # Log first 10 chunks
+                score = ctx.get("score", 0.0)
+                source = ctx.get("source", "unknown")
+                metadata = ctx.get("metadata", {})
+                page = metadata.get("page", "N/A")
+                text_snippet = (ctx.get("text", "")[:200] + "...") if len(ctx.get("text", "")) > 200 else ctx.get("text", "")
+                logger.info(f"[RAG-DEBUG] Chunk {i}: score={score:.3f}, source='{source}', page={page}, snippet='{text_snippet}'")
+        
+        # Additional filtering: remove low-score entries but ensure we keep at least 3-4 chunks
         filtered = []
-        seen_docs = set()
+        seen_doc_page = set()  # Track (doc, page) pairs for diversity
+        strong_hits = 0  # RAG-DEBUG: Count high-quality hits
+        
         for ctx in contexts:
             score = ctx.get("score")
-            if score is not None and score < threshold:
+            # More lenient threshold: only drop if score is very low
+            if score is not None and score < (threshold * 0.5):
                 continue
+            
+            # RAG-DEBUG: Count strong hits
+            if score is not None and score >= 0.75:
+                strong_hits += 1
+            
+            # Light deduplication: skip exact (doc, page) duplicates but allow same doc different pages
             doc_id = ctx.get("metadata", {}).get("document") or ctx.get("source")
-            if doc_id and doc_id in seen_docs:
+            page_id = ctx.get("metadata", {}).get("page")
+            dedup_key = (doc_id, page_id)
+            
+            if dedup_key in seen_doc_page:
                 continue
             if doc_id:
-                seen_docs.add(doc_id)
+                seen_doc_page.add(dedup_key)
+            
             filtered.append(ctx)
-        contexts = filtered if filtered else contexts[:3]
+            
+            # Stop after we have enough diversity
+            if len(filtered) >= k:
+                break
+        
+        # Ensure we always return at least 3 contexts if any exist
+        if len(filtered) < 3 and len(contexts) >= 3:
+            filtered = contexts[:3]
+        elif not filtered and contexts:
+            filtered = contexts[:1]
+        
+        contexts = filtered
         
         if not contexts:
             logger.warning("no usable contexts from qdrant hits; hits=%d", len(raw_hits or []))
@@ -331,6 +372,7 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
         
         # Convert to Documents
         documents = []
+        total_context_chars = 0  # RAG-DEBUG: Track context size
         for context in deduplicated_chunks:
             doc = Document(
                 page_content=context["text"],
@@ -340,8 +382,14 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
             if context["score"] is not None:
                 doc.metadata["similarity_score"] = context["score"]
             documents.append(doc)
+            total_context_chars += len(context["text"])
         
-        logger.info(f"Retrieved {len(documents)} deduplicated documents for query")
+        # RAG-DEBUG: Comprehensive retrieval summary
+        if settings.DEBUG_RAG:
+            logger.info(f"[RAG-DEBUG] Retrieval summary: total_hits={len(contexts)}, strong_hits={strong_hits}, deduped_docs={len(documents)}, total_context_chars={total_context_chars}, unique_sources={len(unique_sources)}, unique_pages={unique_pages}")
+        else:
+            logger.info(f"Retrieved {len(documents)} deduplicated documents for query")
+        
         result = (documents, unique_sources, unique_pages)
         _cache_set(ck, result)
         return result

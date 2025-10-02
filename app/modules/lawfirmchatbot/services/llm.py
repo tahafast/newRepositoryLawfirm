@@ -14,14 +14,69 @@ def _get_client() -> AsyncOpenAI:
 
 
 def looks_like_citations_only(text: str) -> bool:
-    """Check if response is citations-only without substantive content."""
-    t = text.strip().lower()
+    """
+    RAG-DEBUG: Improved citations-only detection to reduce false positives.
+    Check if response is citations-only without substantive content.
+    
+    Returns True only if:
+    - Response is empty or very short (<50 chars)
+    - OR has citations but lacks substantive content (needs ≥2 content lines OR ≥100 chars with ≥1 content line)
+    """
+    from core.config import settings
+    
+    t = text.strip()
     if not t:
         return True
-    # Heuristics: starts with "citations" or contains no sentence terminators before citations list
-    just_citations = t.startswith("citations ") or ("citations [" in t and len(t.splitlines()) < 4)
-    low_content = (t.count(".") + t.count("•") + t.count("- ")) < 2
-    return just_citations or low_content
+    
+    # Very short responses are likely empty/insufficient
+    if len(t) < 50:
+        return True
+    
+    t_lower = t.lower()
+    
+    # RAG-DEBUG: Log detection attempt
+    if settings.DEBUG_RAG:
+        from logging import getLogger
+        logger = getLogger(__name__)
+        logger.info(f"[RAG-DEBUG] Citations detector analyzing: '{t[:150]}...' (length={len(t)})")
+    
+    # Count actual content vs citations/references
+    lines = [line.strip() for line in t.split('\n') if line.strip()]
+    content_lines = 0
+    citation_lines = 0
+    
+    for line in lines:
+        line_lower = line.lower()
+        # Skip empty lines and pure formatting
+        if not line or line in ['---', '***', '']:
+            continue
+        # Count citation/reference lines
+        if (line_lower.startswith(('citations:', 'references:', '**references**', '## references', '[1]', '[2]', '[3]', '[4]', '[5]')) or
+            line_lower.startswith('reference pages:') or
+            line_lower.startswith('**reference pages**') or
+            (line_lower.startswith('[') and ']' in line_lower[:10])):  # [1] Document - Page X pattern
+            citation_lines += 1
+        # Count substantive content lines (meaningful text, not just list markers)
+        elif len(line) > 15 and not line_lower.startswith(('[', 'page ', 'see ', '- [', '* [')):
+            content_lines += 1
+    
+    # RAG-DEBUG: Log analysis results
+    if settings.DEBUG_RAG:
+        logger.info(f"[RAG-DEBUG] Citations analysis: content_lines={content_lines}, citation_lines={citation_lines}, total_lines={len(lines)}, total_chars={len(t)}")
+    
+    # Enhanced detection logic:
+    # - Need at least 2 content lines OR 100+ chars with at least 1 content line
+    # - This allows short but substantive answers while catching citations-only responses
+    has_sufficient_content = content_lines >= 2 or (len(t) >= 100 and content_lines >= 1)
+    
+    # Flag as citations-only if:
+    # - No sufficient content AND (has citation markers OR is short)
+    is_citations_only = not has_sufficient_content and (citation_lines > 0 or len(t) < 100)
+    
+    if settings.DEBUG_RAG:
+        logger.info(f"[RAG-DEBUG] Citations detector result: is_citations_only={is_citations_only}, has_sufficient_content={has_sufficient_content}")
+    
+    return is_citations_only
 
 
 async def chat_completion(messages: List[Dict[str, str]], *, is_legal_query: bool = False, max_tokens: int = None, temperature: float = None) -> str:
@@ -36,7 +91,13 @@ async def chat_completion(messages: List[Dict[str, str]], *, is_legal_query: boo
         effective_temperature = temperature if temperature is not None else settings.OPENAI_TEMPERATURE
         
         if model.startswith("gpt-5"):
-            # gpt-5-mini has restrictions: temperature must be 1.0, limited parameters
+            # gpt-5-mini has restrictions: temperature must be 1.0 (default), so we omit it
+            # RAG-DEBUG: Log that we're using gpt-5 with restricted params
+            if settings.DEBUG_RAG:
+                from logging import getLogger
+                logger = getLogger(__name__)
+                logger.info(f"[RAG-DEBUG] Using {model} with restricted params (no temperature control)")
+            
             params = {
                 "model": model,
                 "messages": messages,
@@ -62,7 +123,39 @@ async def chat_completion(messages: List[Dict[str, str]], *, is_legal_query: boo
             }
         
         response = await client.chat.completions.create(**params)
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        
+        # RAG-DEBUG: Log token usage including reasoning tokens
+        if settings.DEBUG_RAG:
+            from logging import getLogger
+            logger = getLogger(__name__)
+            usage = response.usage
+            logger.info(f"[RAG-DEBUG] Token usage: prompt={usage.prompt_tokens}, completion={usage.completion_tokens}, total={usage.total_tokens}")
+            if hasattr(usage, 'completion_tokens_details') and usage.completion_tokens_details:
+                details = usage.completion_tokens_details
+                if hasattr(details, 'reasoning_tokens') and details.reasoning_tokens:
+                    logger.info(f"[RAG-DEBUG] Reasoning tokens used: {details.reasoning_tokens} (internal thinking)")
+        
+        # RAG-DEBUG: Log if we get None or empty content
+        if content is None or content == "":
+            from logging import getLogger
+            logger = getLogger(__name__)
+            logger.error(f"[RAG-DEBUG] LLM returned None/empty content!")
+            logger.error(f"[RAG-DEBUG] Finish reason: {response.choices[0].finish_reason}")
+            logger.error(f"[RAG-DEBUG] Model: {model}, Max tokens requested: {effective_max_tokens}")
+            
+            # Log token details to diagnose the issue
+            usage = response.usage
+            logger.error(f"[RAG-DEBUG] Token usage: prompt={usage.prompt_tokens}, completion={usage.completion_tokens}, total={usage.total_tokens}")
+            if hasattr(usage, 'completion_tokens_details') and usage.completion_tokens_details:
+                details = usage.completion_tokens_details
+                if hasattr(details, 'reasoning_tokens'):
+                    logger.error(f"[RAG-DEBUG] Reasoning tokens: {details.reasoning_tokens} - THIS IS WHY OUTPUT IS EMPTY!")
+                    logger.error(f"[RAG-DEBUG] Fix: Increase max_tokens to allow for reasoning + actual output")
+            
+            return ""
+        
+        return content
     except Exception as e:
         # Try fallback model if available
         if settings.LLM_MODEL_FALLBACK:
@@ -93,7 +186,13 @@ async def chat_completion(messages: List[Dict[str, str]], *, is_legal_query: boo
                         "presence_penalty": 0.3,
                     }
                 response = await client.chat.completions.create(**fb_params)
-                return response.choices[0].message.content
+                fb_content = response.choices[0].message.content
+                if fb_content is None or fb_content == "":
+                    from logging import getLogger
+                    logger = getLogger(__name__)
+                    logger.error(f"[RAG-DEBUG] Fallback LLM also returned None/empty! Fallback model: {fallback_model}")
+                    return ""
+                return fb_content
             except Exception as fallback_error:
                 raise e  # Re-raise original error if fallback also fails
         else:

@@ -49,21 +49,24 @@ class Settings(BaseSettings):
     LLM_PRESENCE_PENALTY: float = 0.1
     LLM_FREQUENCY_PENALTY: float = 0.1
     
-    # OpenAI Configuration (tightened timeouts for faster responses)
-    OPENAI_CHAT_MODEL: str = "gpt-5-mini"  # Can override with OPENAI_CHAT_MODEL env var
-    OPENAI_MAX_TOKENS: int = 650  # Reduced from 700 for faster responses
-    OPENAI_TEMPERATURE: float = 0.5  # Increased slightly for better variety
+    # OpenAI Configuration
+    OPENAI_CHAT_MODEL: str = "gpt-4o-mini"  # Fast, high-quality, no reasoning tokens
+    OPENAI_MAX_TOKENS: int = 2000  # Increased for detailed, comprehensive responses
+    OPENAI_TEMPERATURE: float = 0.3  # Lower for consistency, reduce hallucination
     OPENAI_TOP_P: float = 1.0
-    OPENAI_TIMEOUT_SECS: int = 25
+    OPENAI_TIMEOUT_SECS: int = 30  # Increased for longer, detailed responses
     
-    # Qdrant Configuration (fast retrieval, tunable for recall vs speed)
-    QDRANT_SEARCH_TIMEOUT_SECS: int = 3  # Tightened from 4s
-    QDRANT_TOP_K_DEFAULT: int = 6  # Reduced from 8 for speed (tune with RETRIEVAL_TOP_K env var)
-    QDRANT_TOP_K_LONG_QUERY: int = 12
-    QDRANT_SCORE_THRESHOLD: float = 0.18  # Tune with RETRIEVAL_SCORE_THRESHOLD env var
+    # Qdrant Configuration (optimized for fast, high-quality retrieval)
+    QDRANT_SEARCH_TIMEOUT_SECS: int = 2  # Tight timeout for faster responses
+    QDRANT_TOP_K_DEFAULT: int = 6  # Focused retrieval: 6 high-quality chunks
+    QDRANT_TOP_K_LONG_QUERY: int = 18  # Fetch more for MMR diversity (3x top_k)
+    QDRANT_SCORE_THRESHOLD: float = 0.40  # Lowered to include more relevant chunks (was 0.55, too strict)
     
     # Embeddings Configuration
     EMBEDDING_MODEL: str = "text-embedding-3-small"
+    
+    # RAG Debug Configuration
+    DEBUG_RAG: bool = False  # Enable detailed RAG pipeline logging (set to True for debugging)
 
     # Web Search
     WEB_SEARCH_ENABLED: bool | None = None  # default: enabled if TAVILY_API_KEY exists
