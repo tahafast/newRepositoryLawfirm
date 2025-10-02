@@ -89,3 +89,117 @@ FEW_SHOTS = [
     {"role": "assistant", "content": "### **Summary**\n- <key point> [1]\n- <key point> [2]\n\n### **Citations**\n- [[1] Title — source]"},
 ]
 
+
+# ===================== Intent Router & Answer Planner =====================
+
+import os
+from functools import lru_cache
+
+
+# ---------- Intent Router (cheap, low temp) ----------
+def route_intent(llm_client, user_query: str) -> dict:
+    """
+    Returns dict: {
+      'intent': 'chit_chat'|'domain_qa'|'multi_domain_qa'|'clarify_needed'|'out_of_scope',
+      'needs_web': bool,
+      'normalized_query': str
+    }
+    """
+    system = (
+        "You are a router for a technical/legal RAG. "
+        "Return strict JSON with keys: intent, needs_web, normalized_query. "
+        "intent ∈ [chit_chat, domain_qa, multi_domain_qa, clarify_needed, out_of_scope]. "
+        "normalized_query: rewrite succinctly with synonyms (≤20 words)."
+    )
+    user = f"Classify and normalize this query:\n{user_query}\nReturn strict JSON."
+
+    resp = llm_client.chat.completions.create(
+        model=os.getenv("ROUTER_MODEL", os.getenv("OPENAI_ROUTER_MODEL", "gpt-5-mini")),
+        messages=[{"role":"system","content":system},{"role":"user","content":user}],
+        temperature=0.1,
+        response_format={"type":"json_object"},
+        timeout=10,
+    )
+    try:
+        import json
+        data = json.loads(resp.choices[0].message.content)
+        data.setdefault("intent", "domain_qa")
+        data.setdefault("needs_web", False)
+        data.setdefault("normalized_query", user_query)
+        return data
+    except Exception:
+        return {"intent":"domain_qa","needs_web":False,"normalized_query":user_query}
+
+
+# ---------- Small-talk / clarify / safe guard ----------
+
+def reply_small_talk():
+    return ("I'm your RAG assistant. Ask about your ingested books "
+            "(Operating Systems, Computer Vision, Generative AI, Entrepreneurship, "
+            "Prompt Engineering, HRM), or share a topic + the detail you need.")
+
+
+def reply_clarify():
+    return ("Could you share a bit more detail (e.g., book or subtopic and level of detail)? "
+            "That helps me pull the exact pages you need.")
+
+
+def reply_not_found(router_needs_web: bool):
+    if router_needs_web:
+        return ("I couldn't find enough in the ingested materials. I can use the web "
+                "if you enable it, or please narrow the topic/book so I can search precisely.")
+    return ("I couldn't find strong matches in the ingested documents. "
+            "Please specify the book/topic or add a bit more detail.")
+
+
+# ---------- Answer Planner (dynamic headings + no citations-only) ----------
+
+def build_context_from_hits(hits, max_chars=12000):
+    parts = []
+    for h in (hits or []):
+        doc = (h.payload or {}).get("document") or (h.payload or {}).get("doc") or ""
+        page = (h.payload or {}).get("page") or (h.payload or {}).get("pages")
+        txt = (h.payload or {}).get("text") or ""
+        head = f"[{doc} p.{page}]" if page else f"[{doc}]"
+        parts.append(f"{head}\n{txt}")
+    ctx = "\n\n---\n".join(parts)
+    return ctx[:max_chars]
+
+
+def answer_with_context(llm_client, user_query: str, hits: list) -> str:
+    system = (
+        "You are a faithful RAG answerer. Use ONLY the provided context. "
+        "If context is insufficient: say so briefly and suggest 1 clarifying question. "
+        "Structure headings dynamically to fit the question (e.g., Definition, Steps, Pros/Cons, Example, Caveats). "
+        "Start with a short direct answer, then details. "
+        "Use inline page citations like [p.410] when you cite lines from context. "
+        "End with a compact 'References' list showing doc names and pages. "
+        "Never output only citations; always include an answer. "
+        "Output Markdown."
+    )
+    context = build_context_from_hits(hits)
+    prompt = f"User question:\n{user_query}\n\nContext (verbatim):\n{context}\n"
+
+    def _ask(sys_add=""):
+        resp = llm_client.chat.completions.create(
+            model=os.getenv("ANSWER_MODEL", os.getenv("OPENAI_ANSWER_MODEL","gpt-5-mini")),
+            messages=[{"role":"system","content":system+sys_add},
+                      {"role":"user","content":prompt}],
+            temperature=float(os.getenv("ANSWER_TEMP","0.2")),
+            max_tokens=int(os.getenv("ANSWER_MAX_TOKENS","900")),
+            timeout=30,
+        )
+        return resp.choices[0].message.content.strip()
+
+    text = _ask()
+    # Guard against "citations-only"
+    if len(text) < 120 or text.lower().startswith("citations"):
+        text = _ask("\nIMPORTANT: Provide an actual answer section (not only citations).")
+    return text
+
+
+# ---------- Query expansion cache (LRU) ----------
+@lru_cache(maxsize=512)
+def _cached_normalize(query: str) -> str:
+    """Cache normalized queries to avoid re-embedding identical queries."""
+    return query.lower().strip()
