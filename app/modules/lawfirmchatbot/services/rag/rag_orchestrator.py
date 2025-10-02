@@ -132,6 +132,21 @@ class RAGOrchestrator:
     async def get_answer(self, query: str) -> QueryResponse:
         """Get answer for a query using optimized RAG with fast intent gate."""
         try:
+            # Meta-query short-circuit for greetings and help
+            META_QS = {"hi", "hello", "hey", "what can you do", "who are you", "help"}
+            q_norm = " ".join(query.lower().split())
+            if any(kw in q_norm for kw in META_QS):
+                meta_answer = (
+                    "I can answer questions about your ingested documents (law, HR, entrepreneurship, CV, OS, etc.). "
+                    "Ask in your own words; I'll find relevant passages, synthesize a clear answer, and provide citations."
+                )
+                return QueryResponse(
+                    success=True,
+                    answer=meta_answer,
+                    answer_markdown=meta_answer,
+                    metadata={"mode": "meta_query"}
+                )
+            
             # Check if there are any documents in Qdrant
             from app.modules.lawfirmchatbot.services.vector_store import points_count, get_qdrant_client
             from app.modules.lawfirmchatbot.services.retrieval.vector_search import search_similar_documents
@@ -212,9 +227,14 @@ class RAGOrchestrator:
             answer = await chat_completion(messages, is_legal_query=True)
             
             # Guard against citations-only responses
-            if len(answer) < 220 or answer.lower().strip().startswith("sources") or answer.lower().strip().startswith("citations"):
+            if self._looks_like_citations_only(answer):
                 logger.warning("Detected citations-only response, retrying with guardrail")
-                retry_prompt = user_prompt + "\n\nYour previous answer was too brief / citations-only. Provide a complete Answer section before Sources."
+                retry_prompt = (
+                    "Your previous output contained only citations.\n"
+                    "Now produce a **concise answer (3–6 sentences)** first, then a single 'Citations: [..]' line.\n"
+                    "Do not apologize. Do not repeat the question. Do not return only citations.\n\n"
+                    + user_prompt
+                )
                 retry_messages = [
                     {"role": "system", "content": self._get_system_prompt()},
                     {"role": "user", "content": retry_prompt}
@@ -251,24 +271,26 @@ class RAGOrchestrator:
                 metadata={"error": str(e)}
             )
 
+    def _looks_like_citations_only(self, txt: str) -> bool:
+        """Check if the response is citations-only without real answer."""
+        t = (txt or "").strip().lower()
+        if not t:
+            return True
+        # Typical failures: starts with "citations", or contains no letters except "citations"
+        only_cites = t.startswith("citations") or (t.replace("citations:", "").strip() == "")
+        # also treat very short strings plus "citations" as failure
+        return only_cites or (len(t) < 60 and "citation" in t)
+    
     def _get_system_prompt(self) -> str:
         """Get system prompt for LLM."""
-        return """You are a precise legal/tech research assistant.
-Use ONLY the provided CONTEXT to answer. If CONTEXT is weak or missing, say so briefly and ask a focused follow-up question.
-Format strictly in markdown:
-# Answer
-<2-6 sentences, concise but informative. No lists here.>
-
-## Key Points
-- 3–6 bullets of the most relevant facts (omit if not applicable).
-
-## Sources
-List as [n] Title (page). No raw URLs, no duplicate entries.
-
-Rules:
-- Do NOT output only citations.
-- If you cite, they must come from CONTEXT.
-- No hallucinations. If context lacks info, state that and ask one clarifying question."""
+        return """You are a careful RAG assistant for a law-firm knowledge base.
+- Answer the user's question **directly first** in clear prose (2–6 short paragraphs or a tight list).
+- Use only the provided CONTEXT unless `allow_web=True` is explicitly set (we currently do not do web).
+- If the context is insufficient, say what is missing and ask a concise follow-up question.
+- After the answer, add a short **Citations** line in the format: [1], [2] …
+- Do NOT output only citations. Always include an answer section.
+- Keep headings short and descriptive. Avoid boilerplate like "Answer:" unless answer would otherwise be ambiguous.
+- No hallucinations: if something isn't in the context, say so briefly."""
 
     def build_user_prompt(self, query: str, chunks: list[dict], sources: list[str], pages: list[int]) -> str:
         """Build user prompt with structured context."""
@@ -282,7 +304,26 @@ Rules:
             ctx_lines.append(f"[{i}] {title} (page {page})\n{text}")
 
         context = "\n\n".join(ctx_lines) if ctx_lines else "NO_RELEVANT_CONTEXT"
-        user = f"Query: {query}\n\nCONTEXT:\n{context}"
+        
+        user = f"""QUESTION:
+{query}
+
+CONTEXT (top {len(chunks)} chunks):
+{context}
+
+Write the answer **first**, then one of these optional sections when appropriate:
+- Key Points (bulleted)
+- Comparison (if the user asks to compare)
+- Steps / Procedure (if procedural)
+- Risks / Caveats (legal cautions etc.)
+
+Finally add a single line:
+Citations: [{{comma-separated citation indices you actually used}}]
+
+Rules:
+- Never output only the "Citations" line.
+- Cite only chunks you actually used.
+- If context is weak, say so and ask a follow-up."""
         return user
 
     def _create_user_prompt(self, query: str, chunks) -> str:
@@ -404,15 +445,30 @@ INSTRUCTIONS:
         messages = fit_context(messages)
         raw_markdown = await chat_completion(messages, is_legal_query=True)
 
-        # Build sections for final formatting shell (light-touch)
-        sections = [
-            {"title": "Answer", "paragraphs": [raw_markdown], "sources": [{"key": k, "title": t} for k, t in source_list]},
-        ]
-        if use_web:
-            sections.append({"title": "Notes", "bullets": [grounding_guardrails(True)]})
+        # Guard against citations-only responses
+        if self._looks_like_citations_only(raw_markdown):
+            logger.warning("Detected citations-only response in answer_query, retrying with guardrail")
+            retry_prompt = (
+                "Your previous output contained only citations.\n"
+                "Now produce a **concise answer (3–6 sentences)** first, then a single 'Citations: [..]' line.\n"
+                "Do not apologize. Do not repeat the question. Do not return only citations.\n\n"
+                + user_prompt
+            )
+            retry_messages = [
+                {"role": "system", "content": self._get_system_prompt()},
+                {"role": "user", "content": retry_prompt},
+            ]
+            retry_messages = fit_context(retry_messages)
+            raw_markdown = await chat_completion(retry_messages, is_legal_query=True)
 
-        final_md = format_markdown(sections)
+        # Use raw_markdown directly instead of wrapping with format_markdown
+        final_md = raw_markdown.strip()
         final_text = strip_markdown(final_md)
+        
+        # Ensure final answer is not empty
+        if not final_text:
+            final_text = "I couldn't find enough information in the provided documents to answer confidently."
+            final_md = final_text
 
         pages = []
         for ch in final_chunks:
