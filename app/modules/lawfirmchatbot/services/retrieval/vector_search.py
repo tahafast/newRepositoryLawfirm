@@ -89,16 +89,32 @@ def normalize_hits(hits: t.Sequence) -> list[dict]:
     """Return [{'text': str, 'source': str, 'score': float, 'id': ...}, ...] with empties filtered."""
     out = []
     for h in hits or []:
-        payload = getattr(h, "payload", None) or {}
-        text = _extract_text(payload)
+        # Handle both dict format (from search_similar with score_threshold) and Qdrant object format
+        if isinstance(h, dict):
+            # Already in dict format
+            text = h.get("text", "")
+            source = h.get("metadata", {}).get("source", "unknown")
+            score = h.get("score")
+            item_id = h.get("id")
+            metadata = h.get("metadata", {})
+        else:
+            # Qdrant object format
+            payload = getattr(h, "payload", None) or {}
+            text = _extract_text(payload)
+            source = _extract_source(payload)
+            score = getattr(h, "score", None)
+            item_id = getattr(h, "id", None)
+            metadata = payload.get("metadata", {})
+        
         if not text:
             continue
+            
         out.append({
             "text": text,
-            "source": _extract_source(payload),
-            "score": getattr(h, "score", None),
-            "id": getattr(h, "id", None),
-            "metadata": payload.get("metadata", {}),
+            "source": source,
+            "score": score,
+            "id": item_id,
+            "metadata": metadata,
         })
     return out
 
