@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 # -------- Retrieval tuning & lightweight cache --------
 from core.config import settings
 
-TOP_K = settings.QDRANT_TOP_K_DEFAULT
+TOP_K = min(getattr(settings, "QDRANT_TOP_K_DEFAULT", 8), 8)
 FETCH_K = settings.QDRANT_TOP_K_LONG_QUERY
-MIN_SCORE = settings.QDRANT_SCORE_THRESHOLD
+MIN_SCORE = getattr(settings, "QDRANT_SCORE_THRESHOLD", 0.18)
 CACHE_TTL_SECONDS = 60
 _cache: dict = {}
 
@@ -272,7 +272,7 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
         import time
         start_time = time.time()
         
-        # Search with timeout and score threshold
+        # Search with timeout and score threshold (tightened to 3s)
         results = search_similar(
             client=client,
             query_vector=query_embedding,
@@ -299,6 +299,21 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
         # Use safe hit normalizer to prevent NoneType subscript errors
         raw_hits = results
         contexts = normalize_hits(raw_hits)
+        
+        # Additional filtering: remove low-score entries and dedupe by document
+        filtered = []
+        seen_docs = set()
+        for ctx in contexts:
+            score = ctx.get("score")
+            if score is not None and score < threshold:
+                continue
+            doc_id = ctx.get("metadata", {}).get("document") or ctx.get("source")
+            if doc_id and doc_id in seen_docs:
+                continue
+            if doc_id:
+                seen_docs.add(doc_id)
+            filtered.append(ctx)
+        contexts = filtered if filtered else contexts[:3]
         
         if not contexts:
             logger.warning("no usable contexts from qdrant hits; hits=%d", len(raw_hits or []))

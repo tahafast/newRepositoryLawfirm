@@ -7,7 +7,7 @@ import re
 
 from app.modules.lawfirmchatbot.services.ingestion.document_processor import process_document
 from app.modules.lawfirmchatbot.services.retrieval.vector_search import add_documents_to_vector_store, search_similar_documents, normalize_hits, build_user_prompt
-from app.modules.lawfirmchatbot.services.llm import chat_completion
+from app.modules.lawfirmchatbot.services.llm import chat_completion, looks_like_citations_only
 from app.modules.lawfirmchatbot.schema.query import QueryResponse, DebugInfo, DebugQueryAnalysis
 from app.modules.lawfirmchatbot.services.query_analyzer import QueryComplexityAnalyzer
 from app.modules.lawfirmchatbot.services.reranker import DocumentReranker
@@ -16,6 +16,20 @@ from app.core.answer_policy import classify_intent, select_strategy, format_mark
 from core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Fast-path detection for greetings and capability questions
+FASTPATH_GREET = {"hi", "hello", "hey", "hola", "yo", "hiya"}
+
+def is_smalltalk_or_capability(q: str) -> bool:
+    """Check if query is a greeting or capability question."""
+    t = (q or "").strip().lower()
+    if not t:
+        return False
+    if t in FASTPATH_GREET:
+        return True
+    if "what can you do" in t or "who are you" in t or "help" == t:
+        return True
+    return False
 
 
 def fit_context(messages: List[Dict[str, str]], max_tokens_for_context: int = 120000) -> List[Dict[str, str]]:
@@ -132,19 +146,19 @@ class RAGOrchestrator:
     async def get_answer(self, query: str) -> QueryResponse:
         """Get answer for a query using optimized RAG with fast intent gate."""
         try:
-            # Meta-query short-circuit for greetings and help
-            META_QS = {"hi", "hello", "hey", "what can you do", "who are you", "help"}
-            q_norm = " ".join(query.lower().split())
-            if any(kw in q_norm for kw in META_QS):
-                meta_answer = (
-                    "I can answer questions about your ingested documents (law, HR, entrepreneurship, CV, OS, etc.). "
-                    "Ask in your own words; I'll find relevant passages, synthesize a clear answer, and provide citations."
-                )
+            # Fast-path for greetings and capability questions (no retrieval, sub-second)
+            if is_smalltalk_or_capability(query):
+                smalltalk_answer = """## How I can help
+- Answer questions using your uploaded documents (Qdrant) with citations.
+- Summarize, compare, outline steps, extract key points, draft memos.
+- If the context is thin, I give a brief overview and mark limits.
+
+**References**: N/A"""
                 return QueryResponse(
                     success=True,
-                    answer=meta_answer,
-                    answer_markdown=meta_answer,
-                    metadata={"mode": "meta_query"}
+                    answer=smalltalk_answer,
+                    answer_markdown=smalltalk_answer,
+                    metadata={"mode": "fastpath_greeting", "sources": [], "page_references": "N/A"}
                 )
             
             # Check if there are any documents in Qdrant
@@ -194,13 +208,19 @@ class RAGOrchestrator:
             )
             
             if not documents:
-                answer = ("I couldn't find relevant information in your documents for this query. "
-                         "Could you clarify what specific legal concept or document section you're looking for?")
+                # Thin-context fallback: provide a brief helpful overview instead of refusal
+                fallback = """## Overview
+Based on limited retrieved snippets, here's a concise overview.
+
+- Summary: (context appears limited for a full answer).
+- If you can specify the chapter/topic or provide more details, I'll refine it.
+
+**References**: limited matches"""
                 return QueryResponse(
                     success=True,
-                    answer=answer,
-                    answer_markdown=f"# Answer\n{answer}",
-                    metadata={"mode": "no_context", "hits": 0}
+                    answer=fallback,
+                    answer_markdown=fallback,
+                    metadata={"mode": "thin_context_fallback", "hits": 0, "sources": [], "page_references": ""}
                 )
             
             # Convert documents to chunks format for prompt building
@@ -224,22 +244,21 @@ class RAGOrchestrator:
             ]
             
             # Get LLM response with guardrail
-            answer = await chat_completion(messages, is_legal_query=True)
+            answer = await chat_completion(messages, is_legal_query=True, max_tokens=650, temperature=0.5)
             
-            # Guard against citations-only responses
-            if self._looks_like_citations_only(answer):
+            # Guard against citations-only responses using the new helper
+            if looks_like_citations_only(answer):
                 logger.warning("Detected citations-only response, retrying with guardrail")
                 retry_prompt = (
-                    "Your previous output contained only citations.\n"
-                    "Now produce a **concise answer (3–6 sentences)** first, then a single 'Citations: [..]' line.\n"
-                    "Do not apologize. Do not repeat the question. Do not return only citations.\n\n"
+                    "Your previous reply looked like citations only. Provide a concise explanation first (3–6 sentences or bullets) "
+                    "and then a small **References** block.\n\n"
                     + user_prompt
                 )
                 retry_messages = [
                     {"role": "system", "content": self._get_system_prompt()},
                     {"role": "user", "content": retry_prompt}
                 ]
-                answer = await chat_completion(retry_messages, is_legal_query=True)
+                answer = await chat_completion(retry_messages, is_legal_query=True, max_tokens=650, temperature=0.4)
             
             # Ensure Sources section exists if we have sources
             if unique_sources and "## Sources" not in answer:
@@ -283,16 +302,19 @@ class RAGOrchestrator:
     
     def _get_system_prompt(self) -> str:
         """Get system prompt for LLM."""
-        return """You are a careful RAG assistant for a law-firm knowledge base.
-- Answer the user's question **directly first** in clear prose (2–6 short paragraphs or a tight list).
-- Use only the provided CONTEXT unless `allow_web=True` is explicitly set (we currently do not do web).
-- If the context is insufficient, say what is missing and ask a concise follow-up question.
-- After the answer, add a short **Citations** line in the format: [1], [2] …
-- Do NOT output only citations. Always include an answer section.
-- Keep headings short and descriptive. Avoid boilerplate like "Answer:" unless answer would otherwise be ambiguous.
-- No hallucinations: if something isn't in the context, say so briefly."""
+        return """You are a precise legal/technical RAG assistant.
+Rules:
+- Always write a short but substantive answer FIRST. Use **dynamic** markdown headings that fit the query (e.g., "Overview", "Main Differences", "Steps", "Risks", "Case Law", etc.). Do not hardcode the same section names for every reply.
+- Use clear paragraphs and bullet points; keep flow readable. Avoid giant walls of text.
+- Use the retrieved context to ground the answer. If context is thin, you may add brief, well-known general knowledge to help the user, and clearly mark limits (e.g., "Based on available snippets…").
+- **Never** return citations alone. The answer must contain real explanatory text (at least 3–5 sentences total or a paragraph + bullets).
+- At the end, add a small "**References**" block showing inline doc markers [1], [2] and a "**Reference Pages**: 3, 41" line if provided.
+- If the user greets or asks about capabilities, respond helpfully without retrieval (fast path).
+Formatting:
+- Markdown headings `##`, bullets, short paragraphs, and spacing.
+- Keep a professional, concise tone; no filler."""
 
-    def build_user_prompt(self, query: str, chunks: list[dict], sources: list[str], pages: list[int]) -> str:
+    def build_user_prompt(self, query: str, chunks: list[dict], sources: list[str], pages: list[int], require_explanation: bool = True, extra_instruction: str = "") -> str:
         """Build user prompt with structured context."""
         ctx_lines = []
         for i, c in enumerate(chunks, 1):
@@ -305,25 +327,19 @@ class RAGOrchestrator:
 
         context = "\n\n".join(ctx_lines) if ctx_lines else "NO_RELEVANT_CONTEXT"
         
-        user = f"""QUESTION:
-{query}
+        explanation_note = ""
+        if require_explanation:
+            explanation_note = "Write a clear explanation first with dynamic headings and bullets; do not output only citations. "
+        
+        user = f"""
+Use the provided context to answer the user. {explanation_note}If context is thin, give a brief helpful overview and mark limits. {extra_instruction}
 
-CONTEXT (top {len(chunks)} chunks):
+Context:
 {context}
 
-Write the answer **first**, then one of these optional sections when appropriate:
-- Key Points (bulleted)
-- Comparison (if the user asks to compare)
-- Steps / Procedure (if procedural)
-- Risks / Caveats (legal cautions etc.)
+User question: {query}
 
-Finally add a single line:
-Citations: [{{comma-separated citation indices you actually used}}]
-
-Rules:
-- Never output only the "Citations" line.
-- Cite only chunks you actually used.
-- If context is weak, say so and ask a follow-up."""
+{f"**Reference Pages**: {', '.join(map(str, pages))}" if pages else ""}"""
         return user
 
     def _create_user_prompt(self, query: str, chunks) -> str:
@@ -424,12 +440,19 @@ INSTRUCTIONS:
                 source_list.append((w["url"], w["title"]))
 
         if not numbered_context:
-            # No KB and web disabled/unavailable → clarify
+            # No KB and web disabled/unavailable → thin-context fallback
+            fallback_md = """## Overview
+Based on limited retrieved snippets, here's a concise overview.
+
+- Summary: (context appears limited for a full answer).
+- If you can specify the chapter/topic or provide more details, I'll refine it.
+
+**References**: limited matches"""
             return {
                 "success": True,
-                "answer": "Could you clarify what specifically you want to know? For example: define, compare, or summarize a particular item.",
-                "answer_markdown": "### **Clarify**\nCould you clarify what specifically you want to know? For example: define, compare, or summarize a particular item.",
-                "metadata": {"strategy": "clarify", "kb_hits": total_hits, "web_used": use_web}
+                "answer": fallback_md,
+                "answer_markdown": fallback_md,
+                "metadata": {"strategy": "thin_context_fallback", "kb_hits": total_hits, "web_used": use_web}
             }
 
         # Compose messages
@@ -443,15 +466,14 @@ INSTRUCTIONS:
         ]
 
         messages = fit_context(messages)
-        raw_markdown = await chat_completion(messages, is_legal_query=True)
+        raw_markdown = await chat_completion(messages, is_legal_query=True, max_tokens=650, temperature=0.5)
 
-        # Guard against citations-only responses
-        if self._looks_like_citations_only(raw_markdown):
+        # Guard against citations-only responses using the imported helper
+        if looks_like_citations_only(raw_markdown):
             logger.warning("Detected citations-only response in answer_query, retrying with guardrail")
             retry_prompt = (
-                "Your previous output contained only citations.\n"
-                "Now produce a **concise answer (3–6 sentences)** first, then a single 'Citations: [..]' line.\n"
-                "Do not apologize. Do not repeat the question. Do not return only citations.\n\n"
+                "Your previous reply looked like citations only. Provide a concise explanation first (3–6 sentences or bullets) "
+                "and then a small **References** block.\n\n"
                 + user_prompt
             )
             retry_messages = [
@@ -459,7 +481,7 @@ INSTRUCTIONS:
                 {"role": "user", "content": retry_prompt},
             ]
             retry_messages = fit_context(retry_messages)
-            raw_markdown = await chat_completion(retry_messages, is_legal_query=True)
+            raw_markdown = await chat_completion(retry_messages, is_legal_query=True, max_tokens=650, temperature=0.4)
 
         # Use raw_markdown directly instead of wrapping with format_markdown
         final_md = raw_markdown.strip()

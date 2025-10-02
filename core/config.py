@@ -49,18 +49,18 @@ class Settings(BaseSettings):
     LLM_PRESENCE_PENALTY: float = 0.1
     LLM_FREQUENCY_PENALTY: float = 0.1
     
-    # OpenAI Configuration (tightened timeouts)
-    OPENAI_CHAT_MODEL: str = "gpt-5-mini"
-    OPENAI_MAX_TOKENS: int = 700
-    OPENAI_TEMPERATURE: float = 0.3
+    # OpenAI Configuration (tightened timeouts for faster responses)
+    OPENAI_CHAT_MODEL: str = "gpt-5-mini"  # Can override with OPENAI_CHAT_MODEL env var
+    OPENAI_MAX_TOKENS: int = 650  # Reduced from 700 for faster responses
+    OPENAI_TEMPERATURE: float = 0.5  # Increased slightly for better variety
     OPENAI_TOP_P: float = 1.0
     OPENAI_TIMEOUT_SECS: int = 25
     
-    # Qdrant Configuration (fast retrieval)
-    QDRANT_SEARCH_TIMEOUT_SECS: int = 4
-    QDRANT_TOP_K_DEFAULT: int = 8
+    # Qdrant Configuration (fast retrieval, tunable for recall vs speed)
+    QDRANT_SEARCH_TIMEOUT_SECS: int = 3  # Tightened from 4s
+    QDRANT_TOP_K_DEFAULT: int = 6  # Reduced from 8 for speed (tune with RETRIEVAL_TOP_K env var)
     QDRANT_TOP_K_LONG_QUERY: int = 12
-    QDRANT_SCORE_THRESHOLD: float = 0.18
+    QDRANT_SCORE_THRESHOLD: float = 0.18  # Tune with RETRIEVAL_SCORE_THRESHOLD env var
     
     # Embeddings Configuration
     EMBEDDING_MODEL: str = "text-embedding-3-small"
