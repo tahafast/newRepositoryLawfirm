@@ -130,10 +130,13 @@ class RAGOrchestrator:
             raise
 
     async def get_answer(self, query: str) -> QueryResponse:
-        """Get answer for a query using enhanced RAG."""
+        """Get answer for a query using enhanced RAG with assess→retrieve flow."""
         try:
             # Check if there are any documents in Qdrant (use Qdrant as source of truth)
-            from app.modules.lawfirmchatbot.services.vector_store import points_count, get_qdrant_client
+            from app.modules.lawfirmchatbot.services.vector_store import points_count, get_qdrant_client, search_similar
+            from app.services.LLM.config import route_intent, reply_small_talk, reply_clarify, reply_not_found, answer_with_context
+            from app.modules.lawfirmchatbot.services.llm import _get_client
+            import os
             
             client = get_qdrant_client()
             if points_count(client) <= 0:
@@ -145,139 +148,88 @@ class RAGOrchestrator:
                     debug_info=None
                 )
             
-            # Analyze query
-            query_analysis = self.query_analyzer.analyze(query)
-            logger.info(f"Query analysis - Type: {query_analysis['query_type']}, "
-                       f"Complexity: {query_analysis['complexity_score']}")
+            # 1) Intent routing (no retrieval yet)
+            openai_client = _get_client()
+            router = route_intent(openai_client, query)
             
-            # Retrieve relevant chunks
-            k = query_analysis['suggested_k']
-            initial_chunks = await search_similar_documents(query, k=k)
-            
-            if not initial_chunks:
+            if router["intent"] == "chit_chat":
                 return QueryResponse(
-                    success=False,
-                    answer="I searched your knowledge base but couldn't find a relevant passage for that query.",
-                    answer_markdown="I searched your knowledge base but couldn't find a relevant passage for that query.",
-                    metadata={"error": "no_relevant_context", "hits": 0},
-                    debug_info=None
+                    success=True,
+                    answer=reply_small_talk(),
+                    answer_markdown=reply_small_talk(),
+                    metadata={"mode":"chit_chat"}
                 )
             
-            # Re-rank chunks
-            reranked_chunks = await self.reranker.rerank_chunks(
-                query, initial_chunks, query_analysis
+            if router["intent"] == "clarify_needed":
+                return QueryResponse(
+                    success=True,
+                    answer=reply_clarify(),
+                    answer_markdown=reply_clarify(),
+                    metadata={"mode":"clarify"}
+                )
+            
+            # 2) Build retrieval query
+            expanded = router.get("normalized_query") or query
+            
+            # 3) Vector search (MMR, small top-k, low timeout)
+            from app.modules.lawfirmchatbot.services.embeddings import embed_text
+            query_embedding = await embed_text(expanded)
+            
+            top_k = int(os.getenv("RAG_TOP_K", "6"))
+            hits = search_similar(
+                client=client,
+                query_vector=query_embedding,
+                top_k=top_k,
+                filter_=None
             )
             
-            # Limit final chunks to keep cost down
-            top_k = min(4, len(reranked_chunks))  # Cap at 4 chunks to control cost
-            final_chunks = reranked_chunks[:top_k]
+            # 4) Confidence gate (avoid hallucination)
+            min_score = float(os.getenv("RAG_MIN_SCORE", "0.18"))
+            if not hits or (getattr(hits[0], "score", 0.0) < min_score):
+                return QueryResponse(
+                    success=True,
+                    answer=reply_not_found(router.get("needs_web", False)),
+                    answer_markdown=reply_not_found(router.get("needs_web", False)),
+                    metadata={"mode":"no_context","hits":len(hits) if hits else 0}
+                )
             
-            # Calculate confidence
-            confidence_analysis = self.retrieval_service.calculate_advanced_confidence(
-                final_chunks, query_analysis
-            )
+            # 5) Plan & answer with dynamic headings
+            final_text = answer_with_context(openai_client, query, hits)
             
-            # Collect page numbers from retrieved chunks
+            # Extract metadata from hits
             pages = []
-            for ch in final_chunks:
-                p = None
-                # Check common metadata keys for page numbers
+            sources = []
+            for h in hits:
+                payload = getattr(h, "payload", None) or {}
+                metadata = payload.get("metadata", {})
+                
+                # Extract page number
                 for key in ("page", "page_number", "pageIndex", "page_index"):
-                    if key in ch.metadata:
-                        p = ch.metadata[key]
+                    p = metadata.get(key) or payload.get(key)
+                    if isinstance(p, (int, float)) and int(p) not in pages:
+                        pages.append(int(p))
                         break
-                if isinstance(p, (int, float)) and p not in pages:
-                    pages.append(int(p))
-            # Keep a short, sorted page list
+                
+                # Extract source
+                src = metadata.get("source") or payload.get("source") or payload.get("document") or "Source"
+                if src not in sources:
+                    sources.append(src)
+            
             pages = sorted(pages)[:12]
-            
-            # Build numbered context for citations
-            numbered_context = []
-            for i, ch in enumerate(final_chunks, start=1):
-                src = ch.metadata.get("source") or ch.metadata.get("document") or "Source"
-                _page = ch.metadata.get("page") or ch.metadata.get("page_number") or ch.metadata.get("page_index")
-                header = f"[{i}] {src}" + (f", page {int(_page)}" if isinstance(_page, (int, float)) else "")
-                numbered_context.append(f"{header}\n{ch.page_content}")
-            
-            if not numbered_context:
-                logger.warning("no usable contexts from chunks (chunks=%d)", len(final_chunks))
-                return QueryResponse(
-                    success=False,
-                    answer="I searched your knowledge base but couldn't find a relevant passage for that query.",
-                    answer_markdown="I searched your knowledge base but couldn't find a relevant passage for that query.",
-                    metadata={"error": "no_relevant_context", "hits": len(final_chunks)},
-                    debug_info=None
-                )
-            
-            # Build user prompt with numbered context
-            user_prompt = f"""Question: {query}
-
-CONTEXT:
-{chr(10).join(numbered_context)}
-
-Format: Markdown only. Use dynamic section headings suitable to the question."""
-            
-            # Create messages for LLM with system prompt, few-shots, and user query
-            messages = [
-                {"role": "system", "content": self._get_system_prompt()}
-            ]
-            
-            # Add few-shot examples
-            messages.extend(self._get_few_shots())
-            
-            # Add the actual user query with context
-            messages.append({"role": "user", "content": user_prompt})
-            
-            # Apply context safety
-            messages = fit_context(messages)
-            
-            # Get LLM response with simple timing and error guard
-            start_ts = datetime.now()
-            logger.info("LLM: sending %d messages (k=%d)", len(messages), len(final_chunks))
-            answer = await chat_completion(
-                messages,
-                is_legal_query=query_analysis['is_legal_query']
-            )
-            elapsed_ms = int((datetime.now() - start_ts).total_seconds() * 1000)
-            logger.info("LLM: received response in %d ms (%d chars)", elapsed_ms, len(answer or ""))
-            
-            # Extract sources for backward compatibility
-            sources = list({
-                (ch.metadata.get("source") or ch.metadata.get("document") or "Source")
-                for ch in final_chunks
-            })
-            
-            # Compute document name from sources (for backward compatibility)
-            document_name = sources[0] if sources else "multiple documents"
-            
-            # Create both markdown and plain text versions
-            answer_markdown = answer
-            answer_plain = strip_markdown(answer)
             
             return QueryResponse(
                 success=True,
-                answer=answer_plain,
-                answer_markdown=answer_markdown,
+                answer=final_text,
+                answer_markdown=final_text,
                 metadata={
-                    "document": document_name,
+                    "hits": len(hits),
+                    "query": expanded,
+                    "mode": "rag",
+                    "top_score": getattr(hits[0], "score", None),
                     "sources": sources,
-                    "chunks_retrieved": k,
-                    "chunks_used": len(final_chunks),
-                    "referenced_pages": pages,  # Use the collected pages
+                    "referenced_pages": pages,
                     "page_references": f"Pages: {', '.join(map(str, pages))}" if pages else "No page references available",
-                    "query_complexity": query_analysis['complexity_score'],
-                    "confidence": confidence_analysis['confidence'],
-                    "confidence_score": confidence_analysis['score'],
-                    "confidence_factors": confidence_analysis['factors'],
-                    "confidence_rationale": confidence_analysis['rationale'],
-                    "processing_strategy": "enhanced_rag"
-                },
-                debug_info=DebugInfo(
-                    query_analysis=DebugQueryAnalysis(**query_analysis),
-                    retrieval_k=k,
-                    reranking_applied=True,
-                    total_pages=len(pages) or 1  # fallback for compatibility
-                )
+                }
             )
             
         except Exception as e:
