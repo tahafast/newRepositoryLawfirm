@@ -19,8 +19,16 @@ async def chat_completion(messages: List[Dict[str, str]], *, is_legal_query: boo
     # Use optimized settings for faster responses
     try:
         # Use max_completion_tokens for gpt-5 models, max_tokens for older models
+        # gpt-5-mini only supports temperature=1.0 (default), so we omit it for gpt-5 models
         model = settings.OPENAI_CHAT_MODEL
-        if model.startswith("gpt-5") or model.startswith("gpt-4o"):
+        if model.startswith("gpt-5"):
+            # gpt-5-mini has restrictions: temperature must be 1.0, limited parameters
+            params = {
+                "model": model,
+                "messages": messages,
+                "max_completion_tokens": settings.OPENAI_MAX_TOKENS,
+            }
+        elif model.startswith("gpt-4o"):
             params = {
                 "model": model,
                 "messages": messages,
@@ -44,7 +52,13 @@ async def chat_completion(messages: List[Dict[str, str]], *, is_legal_query: boo
         if settings.LLM_MODEL_FALLBACK:
             try:
                 fallback_model = settings.LLM_MODEL_FALLBACK
-                if fallback_model.startswith("gpt-5") or fallback_model.startswith("gpt-4o"):
+                if fallback_model.startswith("gpt-5"):
+                    fb_params = {
+                        "model": fallback_model,
+                        "messages": messages,
+                        "max_completion_tokens": settings.OPENAI_MAX_TOKENS,
+                    }
+                elif fallback_model.startswith("gpt-4o"):
                     fb_params = {
                         "model": fallback_model,
                         "messages": messages,
