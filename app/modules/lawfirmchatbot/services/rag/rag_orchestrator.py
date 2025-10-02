@@ -130,13 +130,14 @@ class RAGOrchestrator:
             raise
 
     async def get_answer(self, query: str) -> QueryResponse:
-        """Get answer for a query using enhanced RAG with assess→retrieve flow."""
+        """Get answer for a query using optimized RAG with fast intent gate."""
         try:
-            # Check if there are any documents in Qdrant (use Qdrant as source of truth)
-            from app.modules.lawfirmchatbot.services.vector_store import points_count, get_qdrant_client, search_similar
-            from app.services.LLM.config import route_intent, reply_small_talk, reply_clarify, reply_not_found, answer_with_context
-            from app.modules.lawfirmchatbot.services.llm import _get_client
-            import os
+            # Check if there are any documents in Qdrant
+            from app.modules.lawfirmchatbot.services.vector_store import points_count, get_qdrant_client
+            from app.modules.lawfirmchatbot.services.retrieval.vector_search import search_similar_documents
+            from app.modules.lawfirmchatbot.services.adaptive_retrieval_service import AdaptiveRetrievalService
+            from app.modules.lawfirmchatbot.services.llm import chat_completion
+            from core.config import settings
             
             client = get_qdrant_client()
             if points_count(client) <= 0:
@@ -148,88 +149,96 @@ class RAGOrchestrator:
                     debug_info=None
                 )
             
-            # 1) Intent routing (no retrieval yet)
-            openai_client = _get_client()
-            router = route_intent(openai_client, query)
+            # Fast intent gate
+            retrieval_service = AdaptiveRetrievalService()
+            should_skip, reason = retrieval_service.should_skip_retrieval(query)
             
-            if router["intent"] == "chit_chat":
+            if should_skip:
+                if reason == "small_talk":
+                    answer = ("I'm your legal research assistant. I can help you find information from your uploaded documents. "
+                             "Try asking about specific legal concepts, definitions, or comparisons. "
+                             "Example: 'What is contract liability?' or 'Compare tort vs contract law.'")
+                else:
+                    answer = "I focus on legal document research. Please ask about concepts from your uploaded materials."
+                
                 return QueryResponse(
                     success=True,
-                    answer=reply_small_talk(),
-                    answer_markdown=reply_small_talk(),
-                    metadata={"mode":"chit_chat"}
+                    answer=answer,
+                    answer_markdown=f"# Answer\n{answer}",
+                    metadata={"mode": reason}
                 )
             
-            if router["intent"] == "clarify_needed":
-                return QueryResponse(
-                    success=True,
-                    answer=reply_clarify(),
-                    answer_markdown=reply_clarify(),
-                    metadata={"mode":"clarify"}
-                )
+            # Adaptive top_k based on query characteristics
+            top_k = retrieval_service.get_adaptive_top_k(query)
             
-            # 2) Build retrieval query
-            expanded = router.get("normalized_query") or query
-            
-            # 3) Vector search (MMR, small top-k, low timeout)
-            from app.modules.lawfirmchatbot.services.embeddings import embed_text
-            query_embedding = await embed_text(expanded)
-            
-            top_k = int(os.getenv("RAG_TOP_K", "6"))
-            hits = search_similar(
-                client=client,
-                query_vector=query_embedding,
-                top_k=top_k,
-                filter_=None,
-                mmr=True  # Enable MMR for diversity
+            # Search with deduplication and fast retrieval
+            documents, unique_sources, unique_pages = await search_similar_documents(
+                query, 
+                k=top_k, 
+                score_threshold=settings.QDRANT_SCORE_THRESHOLD
             )
             
-            # 4) Confidence gate (avoid hallucination)
-            min_score = float(os.getenv("RAG_MIN_SCORE", "0.18"))
-            if not hits or (getattr(hits[0], "score", 0.0) < min_score):
+            if not documents:
+                answer = ("I couldn't find relevant information in your documents for this query. "
+                         "Could you clarify what specific legal concept or document section you're looking for?")
                 return QueryResponse(
                     success=True,
-                    answer=reply_not_found(router.get("needs_web", False)),
-                    answer_markdown=reply_not_found(router.get("needs_web", False)),
-                    metadata={"mode":"no_context","hits":len(hits) if hits else 0}
+                    answer=answer,
+                    answer_markdown=f"# Answer\n{answer}",
+                    metadata={"mode": "no_context", "hits": 0}
                 )
             
-            # 5) Plan & answer with dynamic headings
-            final_text = answer_with_context(openai_client, query, hits)
+            # Convert documents to chunks format for prompt building
+            chunks = []
+            for doc in documents:
+                metadata = doc.metadata
+                chunks.append({
+                    "text": doc.page_content,
+                    "source": metadata.get("source", "Document"),
+                    "page": metadata.get("page"),
+                    "document": metadata.get("document", metadata.get("source", "Document"))
+                })
             
-            # Extract metadata from hits
-            pages = []
-            sources = []
-            for h in hits:
-                payload = getattr(h, "payload", None) or {}
-                metadata = payload.get("metadata", {})
-                
-                # Extract page number
-                for key in ("page", "page_number", "pageIndex", "page_index"):
-                    p = metadata.get(key) or payload.get(key)
-                    if isinstance(p, (int, float)) and int(p) not in pages:
-                        pages.append(int(p))
-                        break
-                
-                # Extract source
-                src = metadata.get("source") or payload.get("source") or payload.get("document") or "Source"
-                if src not in sources:
-                    sources.append(src)
+            # Build structured prompt
+            user_prompt = self.build_user_prompt(query, chunks, unique_sources, unique_pages)
             
-            pages = sorted(pages)[:12]
+            # Create messages
+            messages = [
+                {"role": "system", "content": self._get_system_prompt()},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            # Get LLM response with guardrail
+            answer = await chat_completion(messages, is_legal_query=True)
+            
+            # Guard against citations-only responses
+            if len(answer) < 220 or answer.lower().strip().startswith("sources") or answer.lower().strip().startswith("citations"):
+                logger.warning("Detected citations-only response, retrying with guardrail")
+                retry_prompt = user_prompt + "\n\nYour previous answer was too brief / citations-only. Provide a complete Answer section before Sources."
+                retry_messages = [
+                    {"role": "system", "content": self._get_system_prompt()},
+                    {"role": "user", "content": retry_prompt}
+                ]
+                answer = await chat_completion(retry_messages, is_legal_query=True)
+            
+            # Ensure Sources section exists if we have sources
+            if unique_sources and "## Sources" not in answer:
+                sources_section = "\n\n## Sources\n"
+                for i, source in enumerate(unique_sources[:5], 1):  # Limit to 5 sources
+                    sources_section += f"[{i}] {source}\n"
+                answer += sources_section
             
             return QueryResponse(
                 success=True,
-                answer=final_text,
-                answer_markdown=final_text,
+                answer=answer,
+                answer_markdown=answer,
                 metadata={
-                    "hits": len(hits),
-                    "query": expanded,
+                    "hits": len(documents),
+                    "sources": unique_sources,
+                    "referenced_pages": unique_pages,
+                    "page_references": f"Pages: {', '.join(map(str, unique_pages))}" if unique_pages else "No page references available",
                     "mode": "rag",
-                    "top_score": getattr(hits[0], "score", None),
-                    "sources": sources,
-                    "referenced_pages": pages,
-                    "page_references": f"Pages: {', '.join(map(str, pages))}" if pages else "No page references available",
+                    "top_k": top_k
                 }
             )
             
@@ -244,65 +253,37 @@ class RAGOrchestrator:
 
     def _get_system_prompt(self) -> str:
         """Get system prompt for LLM."""
-        return (
-            "You are a legal RAG assistant. Use only the supplied KB chunks and/or web snippets.\n"
-            "- Never invent citations or facts. If a requested comparison/topic isn’t found in the supplied context, say so and (only if allowed) use web snippets you were given.\n"
-            "- Prefer precise, lawyer-friendly wording; keep it concise but substantive.\n"
-            "- Output Markdown with bold H3 section headings; tailor section names to the query intent.\n"
-            "- Use bracketed numeric citations like [1], [2] inline, and repeat them in a \"Citations\" section.\n"
-            "- If the user asks for a summary, include 3–6 bullet key points.\n"
-            "- If the user asks to compare, present a short table then bullets.\n"
-            "- If context is insufficient and web is disabled/unavailable, ask a clarifying question instead of guessing.\n"
-        )
-
-    def _get_few_shots(self) -> List[Dict[str, str]]:
-        """Get few-shot examples for the LLM."""
-        return [
-            {
-                "role": "user",
-                "content": "key man summary"
-            },
-            {
-                "role": "assistant", 
-                "content": """## Summary
-Key Man insurance provides financial protection for businesses when a critical employee becomes unavailable due to death or disability [1].
+        return """You are a precise legal/tech research assistant.
+Use ONLY the provided CONTEXT to answer. If CONTEXT is weak or missing, say so briefly and ask a focused follow-up question.
+Format strictly in markdown:
+# Answer
+<2-6 sentences, concise but informative. No lists here.>
 
 ## Key Points
-- Protects against loss of key personnel [1]
-- Covers death and disability scenarios [1]
-- Business pays premiums and receives benefits [1]
+- 3–6 bullets of the most relevant facts (omit if not applicable).
 
-## Supporting Evidence
-- "Key Man insurance protects businesses from financial loss when critical employees become unavailable" [1]"""
-            },
-            {
-                "role": "user",
-                "content": "define chain of title in one paragraph"
-            },
-            {
-                "role": "assistant",
-                "content": """## Definition
-Chain of title refers to the complete sequence of ownership transfers for a property, tracing from the original owner to the current holder, establishing legal ownership history [1].
+## Sources
+List as [n] Title (page). No raw URLs, no duplicate entries.
 
-## Notes
-- Essential for property transactions [1]
-- Must be unbroken to ensure clear title [1]"""
-            },
-            {
-                "role": "user", 
-                "content": "compare tort vs contract liability"
-            },
-            {
-                "role": "assistant",
-                "content": """## Comparison
-- Tort liability arises from wrongful acts causing harm, while contract liability stems from breach of agreement [1]
-- Tort damages are compensatory, contract damages are expectation-based [2]
+Rules:
+- Do NOT output only citations.
+- If you cite, they must come from CONTEXT.
+- No hallucinations. If context lacks info, state that and ask one clarifying question."""
 
-## Evidence
-- "Tort liability focuses on harm caused by wrongful conduct" [1]
-- "Contract liability enforces promises and expectations" [2]"""
-            }
-        ]
+    def build_user_prompt(self, query: str, chunks: list[dict], sources: list[str], pages: list[int]) -> str:
+        """Build user prompt with structured context."""
+        ctx_lines = []
+        for i, c in enumerate(chunks, 1):
+            title = (c.get("document") or c.get("source") or "Document").strip()
+            page = c.get("page") or c.get("page_number") or "N/A"
+            text = (c.get("text") or "").strip()
+            if not text:
+                continue
+            ctx_lines.append(f"[{i}] {title} (page {page})\n{text}")
+
+        context = "\n\n".join(ctx_lines) if ctx_lines else "NO_RELEVANT_CONTEXT"
+        user = f"Query: {query}\n\nCONTEXT:\n{context}"
+        return user
 
     def _create_user_prompt(self, query: str, chunks) -> str:
         """Create user prompt with chunks."""

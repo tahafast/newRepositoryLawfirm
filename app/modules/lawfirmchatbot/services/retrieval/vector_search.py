@@ -14,9 +14,11 @@ from app.modules.lawfirmchatbot.services.embeddings import embed_text, embed_tex
 logger = logging.getLogger(__name__)
 
 # -------- Retrieval tuning & lightweight cache --------
-TOP_K = 4
-FETCH_K = 24
-MIN_SCORE = 0.24
+from core.config import settings
+
+TOP_K = settings.QDRANT_TOP_K_DEFAULT
+FETCH_K = settings.QDRANT_TOP_K_LONG_QUERY
+MIN_SCORE = settings.QDRANT_SCORE_THRESHOLD
 CACHE_TTL_SECONDS = 60
 _cache: dict = {}
 
@@ -99,6 +101,49 @@ def normalize_hits(hits: t.Sequence) -> list[dict]:
             "metadata": payload.get("metadata", {}),
         })
     return out
+
+
+def _deduplicate_chunks(chunks: list[dict]) -> tuple[list[dict], list[str], list[int]]:
+    """
+    Deduplicate chunks by (document_id, page_number) and return clean results.
+    
+    Returns:
+        tuple: (deduplicated_chunks, unique_sources, unique_pages)
+    """
+    seen = set()
+    deduplicated = []
+    unique_sources = []
+    unique_pages = []
+    
+    for chunk in chunks:
+        # Create deduplication key
+        source = chunk.get("source", "unknown")
+        metadata = chunk.get("metadata", {})
+        
+        # Extract page number
+        page = None
+        for key in ("page", "page_number", "pageIndex", "page_index"):
+            p = metadata.get(key)
+            if isinstance(p, (int, float)):
+                page = int(p)
+                break
+        
+        dedup_key = (source, page)
+        
+        if dedup_key not in seen:
+            seen.add(dedup_key)
+            deduplicated.append(chunk)
+            
+            if source not in unique_sources:
+                unique_sources.append(source)
+            
+            if page is not None and page not in unique_pages:
+                unique_pages.append(page)
+    
+    # Sort pages for consistent output
+    unique_pages.sort()
+    
+    return deduplicated, unique_sources, unique_pages
 
 
 def build_user_prompt(query: str, contexts: list[dict]) -> str:
@@ -184,13 +229,19 @@ async def add_documents_to_vector_store(documents: List[Document]) -> int:
         raise
 
 
-async def search_similar_documents(query: str, k: int = TOP_K) -> List[Document]:
-    """Search for similar documents with fallback strategies."""
+async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: float = None) -> tuple[List[Document], list[str], list[int]]:
+    """
+    Search for similar documents with optimized deduplication and fast retrieval.
+    
+    Returns:
+        tuple: (documents, unique_sources, unique_pages)
+    """
     try:
         client = get_qdrant()
         k = max(1, k)
+        threshold = score_threshold or MIN_SCORE
         nq = _normalize_query(query)
-        ck = (nq, k)
+        ck = (nq, k, threshold)
         cached = _cache_get(ck)
         if cached is not None:
             logger.info("vector_search cache hit top_k=%d", k)
@@ -205,26 +256,30 @@ async def search_similar_documents(query: str, k: int = TOP_K) -> List[Document]
         import time
         start_time = time.time()
         
-        # Search with primary threshold using vector_store helper
+        # Search with timeout and score threshold
         results = search_similar(
             client=client,
             query_vector=query_embedding,
-            top_k=FETCH_K,
-            filter_=None
+            top_k=k,
+            filter_=None,
+            score_threshold=threshold,
+            timeout=settings.QDRANT_SEARCH_TIMEOUT_SECS
         )
         
         # Light observability: after search
         elapsed_ms = int((time.time() - start_time) * 1000)
         logger.info(f"vector_search got hits={len(results or [])} in {elapsed_ms}ms")
         
-        # If no results, retry with more results and no threshold
+        # If no results, retry with lower threshold
         if not results:
-            logger.info("No results with default settings, retrying with more results")
+            logger.info("No results with threshold, retrying with lower threshold")
             results = search_similar(
                 client=client,
                 query_vector=query_embedding,
-                top_k=FETCH_K,
-                filter_=None
+                top_k=k,
+                filter_=None,
+                score_threshold=threshold * 0.5,
+                timeout=settings.QDRANT_SEARCH_TIMEOUT_SECS
             )
         
         # Use safe hit normalizer to prevent NoneType subscript errors
@@ -232,20 +287,22 @@ async def search_similar_documents(query: str, k: int = TOP_K) -> List[Document]
         contexts = normalize_hits(raw_hits)
         
         if not contexts:
-            # Don't raise; return empty list with logs. Avoid subscripting [].
             logger.warning("no usable contexts from qdrant hits; hits=%d", len(raw_hits or []))
-            return []
+            return [], [], []
         
-        # Convert normalized hits to Documents
-        documents = []
-        # Filter by score first
+        # Filter by score and deduplicate
         filtered = []
         for context in contexts:
             score = context["score"] if context["score"] is not None else context["metadata"].get("similarity_score")
-            if score is None or float(score) >= MIN_SCORE:
+            if score is None or float(score) >= threshold:
                 filtered.append(context)
 
-        for context in filtered[:k]:  # Limit to requested k
+        # Deduplicate chunks by (document_id, page_number)
+        deduplicated_chunks, unique_sources, unique_pages = _deduplicate_chunks(filtered[:k])
+        
+        # Convert to Documents
+        documents = []
+        for context in deduplicated_chunks:
             doc = Document(
                 page_content=context["text"],
                 metadata=context["metadata"]
@@ -255,10 +312,11 @@ async def search_similar_documents(query: str, k: int = TOP_K) -> List[Document]
                 doc.metadata["similarity_score"] = context["score"]
             documents.append(doc)
         
-        logger.info(f"Retrieved {len(documents)} documents for query")
-        _cache_set(ck, documents)
-        return documents
+        logger.info(f"Retrieved {len(documents)} deduplicated documents for query")
+        result = (documents, unique_sources, unique_pages)
+        _cache_set(ck, result)
+        return result
         
     except Exception as e:
         logger.error(f"Similarity search failed: {str(e)}", exc_info=True)
-        return []
+        return [], [], []

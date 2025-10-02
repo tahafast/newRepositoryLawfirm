@@ -40,14 +40,27 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str | None = None
     GOOGLE_API_KEY: str | None = None
     
-    # LLM Behavior Settings (gpt-5 uses limited knobs)
-    LLM_TEMPERATURE_DEFAULT: float = 1.0
-    LLM_TEMPERATURE_LEGAL: float = 1.0
-    LLM_MAX_TOKENS: int = 1200
-    LLM_MAX_OUTPUT_TOKENS: int = 1200
-    LLM_TOP_P: float = 0.9
+    # LLM Behavior Settings (optimized for speed and quality)
+    LLM_TEMPERATURE_DEFAULT: float = 0.3
+    LLM_TEMPERATURE_LEGAL: float = 0.3
+    LLM_MAX_TOKENS: int = 700
+    LLM_MAX_OUTPUT_TOKENS: int = 700
+    LLM_TOP_P: float = 1.0
     LLM_PRESENCE_PENALTY: float = 0.1
     LLM_FREQUENCY_PENALTY: float = 0.1
+    
+    # OpenAI Configuration (tightened timeouts)
+    OPENAI_CHAT_MODEL: str = "gpt-5-mini"
+    OPENAI_MAX_TOKENS: int = 700
+    OPENAI_TEMPERATURE: float = 0.3
+    OPENAI_TOP_P: float = 1.0
+    OPENAI_TIMEOUT_SECS: int = 25
+    
+    # Qdrant Configuration (fast retrieval)
+    QDRANT_SEARCH_TIMEOUT_SECS: int = 4
+    QDRANT_TOP_K_DEFAULT: int = 8
+    QDRANT_TOP_K_LONG_QUERY: int = 12
+    QDRANT_SCORE_THRESHOLD: float = 0.18
     
     # Embeddings Configuration
     EMBEDDING_MODEL: str = "text-embedding-3-small"
@@ -80,7 +93,7 @@ def get_qdrant_client() -> QdrantClient:
         return QdrantClient(
             url=settings.QDRANT_URL,
             api_key=settings.QDRANT_API_KEY or None,
-            timeout=30.0
+            timeout=settings.QDRANT_SEARCH_TIMEOUT_SECS
         )
 
 
@@ -97,7 +110,7 @@ def get_llm_client() -> AsyncOpenAI:
     """Create LLM client based on LLM configuration."""
     return AsyncOpenAI(
         api_key=settings.OPENAI_API_KEY,
-        timeout=60.0
+        timeout=settings.OPENAI_TIMEOUT_SECS
     )
 
 

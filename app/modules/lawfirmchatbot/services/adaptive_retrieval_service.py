@@ -1,20 +1,65 @@
 """
-Simple Adaptive Retrieval Service Stub
-Provides basic adaptive retrieval functionality
+Simple Adaptive Retrieval Service with Fast Intent Gate
+Provides basic adaptive retrieval functionality with cheap intent detection
 """
 
 from typing import Dict, Any, List
 import logging
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Fast intent detection (no model calls)
+SMALL_TALK = {"hi", "hello", "hey", "good morning", "good evening", "what can you do", "who are you"}
+DOC_FREE_INTENTS = {"joke", "weather", "time"}
+
+def _is_smalltalk(q: str) -> bool:
+    """Detect small talk queries without expensive model calls."""
+    s = q.strip().lower()
+    return any(s.startswith(x) or s == x for x in SMALL_TALK)
+
+def _looks_like_definition(q: str) -> bool:
+    """Detect definition queries."""
+    s = q.lower()
+    return any(k in s for k in ["what is", "define", "explain", "meaning of", "overview of"])
+
+def _is_comparison(q: str) -> bool:
+    """Detect comparison queries."""
+    s = q.lower()
+    return " vs " in s or "compare" in s or "difference between" in s
+
+def _get_adaptive_top_k(query: str) -> int:
+    """Determine optimal top_k based on query characteristics."""
+    if len(query) > 140 or _is_comparison(query):
+        return settings.QDRANT_TOP_K_LONG_QUERY
+    return settings.QDRANT_TOP_K_DEFAULT
+
 
 class AdaptiveRetrievalService:
-    """Simple adaptive retrieval service."""
+    """Simple adaptive retrieval service with fast intent gate."""
     
     def __init__(self):
         """Initialize the adaptive retrieval service."""
         logger.info("Initialized AdaptiveRetrievalService")
+    
+    def should_skip_retrieval(self, query: str) -> tuple[bool, str]:
+        """
+        Fast intent gate to determine if retrieval should be skipped.
+        
+        Returns:
+            tuple: (should_skip, reason)
+        """
+        if _is_smalltalk(query):
+            return True, "small_talk"
+        
+        if any(intent in query.lower() for intent in DOC_FREE_INTENTS):
+            return True, "doc_free_intent"
+        
+        return False, "needs_retrieval"
+    
+    def get_adaptive_top_k(self, query: str) -> int:
+        """Get adaptive top_k based on query characteristics."""
+        return _get_adaptive_top_k(query)
     
     def adapt_retrieval_strategy(self, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Adapt retrieval strategy based on query analysis."""
