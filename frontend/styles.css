@@ -175,6 +175,11 @@ footer{margin:32px 0;color:var(--muted);font-size:.85rem}
   .nav, .navbar, header, .topbar{ padding:12px 16px }
   .card, .panel{ padding:18px }
 }
+
+/* RAG readability tweaks (lightweight) */
+.chat-card p { margin: 0.45rem 0 0.85rem; line-height: 1.6; }
+.chat-card h2, .chat-card h3 { margin: 0.9rem 0 0.5rem; line-height: 1.35; }
+.chat-card ul { margin: 0.35rem 0 0.8rem; padding-left: 1.25rem; }
 /* ===== THEME VARIABLES ===== */
 :root{
   /* -------- LIGHT (baby blue) -------- */
@@ -314,3 +319,8 @@ footer{margin:32px 0;color:var(--muted);font-size:.85rem}
   .nav, .navbar, header, .topbar{ padding:12px 16px }
   .card, .panel{ padding:18px }
 }
+
+/* RAG readability tweaks (lightweight) */
+.chat-card p { margin: 0.45rem 0 0.85rem; line-height: 1.6; }
+.chat-card h2, .chat-card h3 { margin: 0.9rem 0 0.5rem; line-height: 1.35; }
+.chat-card ul { margin: 0.35rem 0 0.8rem; padding-left: 1.25rem; }
