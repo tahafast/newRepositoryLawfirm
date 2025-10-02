@@ -13,6 +13,40 @@ from app.modules.lawfirmchatbot.services.embeddings import embed_text, embed_tex
 
 logger = logging.getLogger(__name__)
 
+# -------- Retrieval tuning & lightweight cache --------
+TOP_K = 4
+FETCH_K = 24
+MIN_SCORE = 0.24
+CACHE_TTL_SECONDS = 60
+_cache: dict = {}
+
+
+def _normalize_query(q: str) -> str:
+    q = (q or "").strip().lower()
+    if "summary" in q:
+        q += " overview abstract synopsis"
+    if "types" in q:
+        q += " kinds categories variants"
+    if "compare" in q or " vs" in q or "versus" in q:
+        q += " comparison differences pros cons"
+    return q
+
+
+def _cache_get(key):
+    item = _cache.get(key)
+    if not item:
+        return None
+    import time as _t
+    if _t.time() - item[0] > CACHE_TTL_SECONDS:
+        _cache.pop(key, None)
+        return None
+    return item[1]
+
+
+def _cache_set(key, value):
+    import time as _t
+    _cache[key] = (_t.time(), value)
+
 
 def _extract_source(payload: dict) -> str:
     """Extract source/document name from payload."""
@@ -150,13 +184,20 @@ async def add_documents_to_vector_store(documents: List[Document]) -> int:
         raise
 
 
-async def search_similar_documents(query: str, k: int = 5) -> List[Document]:
+async def search_similar_documents(query: str, k: int = TOP_K) -> List[Document]:
     """Search for similar documents with fallback strategies."""
     try:
         client = get_qdrant()
+        k = max(1, k)
+        nq = _normalize_query(query)
+        ck = (nq, k)
+        cached = _cache_get(ck)
+        if cached is not None:
+            logger.info("vector_search cache hit top_k=%d", k)
+            return cached
         
         # Generate query embedding
-        query_embedding = await embed_text(query)
+        query_embedding = await embed_text(nq)
         
         # Light observability: before search
         logger.info(f"vector_search start top_k={k}")
@@ -168,7 +209,7 @@ async def search_similar_documents(query: str, k: int = 5) -> List[Document]:
         results = search_similar(
             client=client,
             query_vector=query_embedding,
-            top_k=k,
+            top_k=FETCH_K,
             filter_=None
         )
         
@@ -182,7 +223,7 @@ async def search_similar_documents(query: str, k: int = 5) -> List[Document]:
             results = search_similar(
                 client=client,
                 query_vector=query_embedding,
-                top_k=k * 2,
+                top_k=FETCH_K,
                 filter_=None
             )
         
@@ -197,7 +238,14 @@ async def search_similar_documents(query: str, k: int = 5) -> List[Document]:
         
         # Convert normalized hits to Documents
         documents = []
-        for context in contexts[:k]:  # Limit to requested k
+        # Filter by score first
+        filtered = []
+        for context in contexts:
+            score = context["score"] if context["score"] is not None else context["metadata"].get("similarity_score")
+            if score is None or float(score) >= MIN_SCORE:
+                filtered.append(context)
+
+        for context in filtered[:k]:  # Limit to requested k
             doc = Document(
                 page_content=context["text"],
                 metadata=context["metadata"]
@@ -208,6 +256,7 @@ async def search_similar_documents(query: str, k: int = 5) -> List[Document]:
             documents.append(doc)
         
         logger.info(f"Retrieved {len(documents)} documents for query")
+        _cache_set(ck, documents)
         return documents
         
     except Exception as e:

@@ -110,7 +110,20 @@ async def process_document_query(
     """
     try:
         rag_orchestrator = get_rag_orchestrator()
-        return await rag_orchestrator.get_answer(request.query)
+        # New high-level orchestrator path with strategy routing; fallback to legacy if needed
+        try:
+            result = await rag_orchestrator.answer_query(request.query)
+            from app.modules.lawfirmchatbot.schema.query import QueryResponse
+            return QueryResponse(
+                success=bool(result.get("success", True)),
+                answer=str(result.get("answer", "")),
+                answer_markdown=result.get("answer_markdown"),
+                metadata=result.get("metadata", {}),
+                debug_info=None,
+            )
+        except AttributeError:
+            # Older orchestrator without answer_query
+            return await rag_orchestrator.get_answer(request.query)
     except Exception as e:
         logger.error(f"Query processing failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e)) from e

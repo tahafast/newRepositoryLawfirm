@@ -24,3 +24,8 @@ services:
         value: law_docs_v1
       - key: QDRANT_COLLECTION_ALIAS
         value: law_docs_current
+      # Optional web search
+      - key: TAVILY_API_KEY
+        sync: from-dashboard
+      - key: WEB_SEARCH_ENABLED
+        value: "true"

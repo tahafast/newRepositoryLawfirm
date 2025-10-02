@@ -33,6 +33,7 @@ class DebugInfo(BaseModel):
 class QueryResponse(BaseModel):
     success: bool
     answer: str
+    answer_markdown: Optional[str] = None
     metadata: Dict[str, Any]
     debug_info: Optional[DebugInfo] = None
 

@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     
     # LLM
     LLM_PROVIDER: str = "openai"
-    LLM_MODEL: str = "gpt-3.5-turbo"
+    LLM_MODEL: str = "gpt-5-mini"
+    LLM_MODEL_FALLBACK: str | None = None
     OPENAI_API_KEY: str | None = None
     AZURE_OPENAI_API_KEY: str | None = None
     AZURE_OPENAI_ENDPOINT: str | None = None
@@ -39,15 +40,21 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str | None = None
     GOOGLE_API_KEY: str | None = None
     
-    # LLM Behavior Settings
-    LLM_TEMPERATURE_DEFAULT: float = 0.4
-    LLM_TEMPERATURE_LEGAL: float = 0.2
-    LLM_MAX_TOKENS: int = 2000
+    # LLM Behavior Settings (gpt-5 uses limited knobs)
+    LLM_TEMPERATURE_DEFAULT: float = 1.0
+    LLM_TEMPERATURE_LEGAL: float = 1.0
+    LLM_MAX_TOKENS: int = 1200
+    LLM_MAX_OUTPUT_TOKENS: int = 1200
+    LLM_TOP_P: float = 0.9
     LLM_PRESENCE_PENALTY: float = 0.1
     LLM_FREQUENCY_PENALTY: float = 0.1
     
     # Embeddings Configuration
     EMBEDDING_MODEL: str = "text-embedding-3-small"
+
+    # Web Search
+    WEB_SEARCH_ENABLED: bool | None = None  # default: enabled if TAVILY_API_KEY exists
+    TAVILY_API_KEY: str | None = None
     
     # CORS Configuration
     CORS_ALLOWED_ORIGINS: list[str] = [

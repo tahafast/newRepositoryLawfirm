@@ -34,6 +34,7 @@ qdrant-client>=1.11.0
 # AI and ML
 openai>=1.12.0
 numpy>=1.24.3
+aiohttp>=3.10.5
 
 # Enhanced features - install if needed for better performance
 # sentence-transformers==2.2.2

@@ -1,6 +1,9 @@
 """
-Global LLM Configuration
-Centralized LLM provider configuration and key management
+Global LLM Configuration and Prompting Utilities
+
+Centralized provider configuration, plus reusable system prompt and few-shots
+for RAG. These helpers are imported by the orchestrator so the prompt stays
+consistent across call sites.
 """
 
 from typing import Optional
@@ -65,3 +68,24 @@ def get_llm_settings() -> LLMConfig:
 def get_llm_config() -> LLMConfig:
     """Legacy alias for get_llm_settings()."""
     return get_llm_settings()
+
+
+# ===================== Prompting =====================
+
+SYSTEM_PROMPT = (
+    "You are a legal RAG assistant. Use only the supplied KB chunks and/or web snippets.\n"
+    "- Never invent citations or facts. If a requested comparison/topic isn’t found in the supplied context, say so and (only if allowed) use web snippets you were given.\n"
+    "- Prefer precise, lawyer-friendly wording; keep it concise but substantive.\n"
+    "- Output Markdown with bold H3 section headings; tailor section names to the query intent.\n"
+    "- Use bracketed numeric citations like [1], [2] inline, and repeat them in a \"Citations\" section.\n"
+    "- If the user asks for a summary, include 3–6 bullet key points.\n"
+    "- If the user asks to compare, present a short table then bullets.\n"
+    "- If context is insufficient and web is disabled/unavailable, ask a clarifying question instead of guessing.\n"
+)
+
+FEW_SHOTS = [
+    {"role": "assistant", "content": "### **Definition**\n<one-paragraph definition> [1]\n\n### **Key Points**\n- <point> [1]\n\n### **Citations**\n- [[1] Title — source]"},
+    {"role": "assistant", "content": "### **Quick Comparison Table**\n| Item | Feature |\n|---|---|\n| A | ... |\n| B | ... |\n\n### **Key Differences**\n- <difference> [1]\n\n### **Citations**\n- [[1] Title — source]"},
+    {"role": "assistant", "content": "### **Summary**\n- <key point> [1]\n- <key point> [2]\n\n### **Citations**\n- [[1] Title — source]"},
+]
+

@@ -100,18 +100,24 @@ class GlobalLLMService:
             settings.LLM_TEMPERATURE_LEGAL if is_legal_query 
             else settings.LLM_TEMPERATURE_DEFAULT
         )
-        tokens = max_tokens or settings.LLM_MAX_TOKENS
+        tokens = max_tokens or settings.LLM_MAX_OUTPUT_TOKENS
         model_name = model or settings.LLM_MODEL
         
         try:
-            response = await self._client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=temp,
-                max_tokens=tokens,
-                presence_penalty=settings.LLM_PRESENCE_PENALTY,
-                frequency_penalty=settings.LLM_FREQUENCY_PENALTY,
-            )
+            token_arg = {("max_completion_tokens" if model_name.startswith("gpt-5") else "max_tokens"): tokens}
+            params = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": temp,
+                **token_arg,
+            }
+            if not model_name.startswith("gpt-5"):
+                params.update({
+                    "top_p": settings.LLM_TOP_P,
+                    "presence_penalty": settings.LLM_PRESENCE_PENALTY,
+                    "frequency_penalty": settings.LLM_FREQUENCY_PENALTY,
+                })
+            response = await self._client.chat.completions.create(**params)
             
             content = response.choices[0].message.content
             if content is None:
@@ -121,7 +127,38 @@ class GlobalLLMService:
             return content
             
         except Exception as e:
-            logger.error(f"LLM chat completion failed: {str(e)}")
+            logger.error(f"LLM chat completion failed with model {model_name}: {str(e)}")
+            
+            # Try fallback model if available
+            if settings.LLM_MODEL_FALLBACK and model_name == settings.LLM_MODEL:
+                logger.info(f"Attempting fallback to {settings.LLM_MODEL_FALLBACK}")
+                try:
+                    fb_token_arg = {("max_completion_tokens" if settings.LLM_MODEL_FALLBACK.startswith("gpt-5") else "max_tokens"): tokens}
+                    fb_params = {
+                        "model": settings.LLM_MODEL_FALLBACK,
+                        "messages": messages,
+                        "temperature": temp,
+                        **fb_token_arg,
+                    }
+                    if not settings.LLM_MODEL_FALLBACK.startswith("gpt-5"):
+                        fb_params.update({
+                            "top_p": settings.LLM_TOP_P,
+                            "presence_penalty": settings.LLM_PRESENCE_PENALTY,
+                            "frequency_penalty": settings.LLM_FREQUENCY_PENALTY,
+                        })
+                    response = await self._client.chat.completions.create(**fb_params)
+                    
+                    content = response.choices[0].message.content
+                    if content is None:
+                        logger.warning("Fallback LLM returned empty response")
+                        return ""
+                    
+                    logger.info(f"Successfully used fallback model {settings.LLM_MODEL_FALLBACK}")
+                    return content
+                    
+                except Exception as fallback_error:
+                    logger.error(f"Fallback model {settings.LLM_MODEL_FALLBACK} also failed: {str(fallback_error)}")
+            
             raise
     
     async def generate_embeddings(self, text: str, model: Optional[str] = None) -> List[float]:

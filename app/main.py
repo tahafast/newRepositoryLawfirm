@@ -6,11 +6,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, PlainTextResponse
-from core.config import settings, wire_services, perform_warmup
-from core.logging_conf import logging  # side-effect: configures logging
 from app.modules.router import router as modules_router
-
-logger = logging.getLogger(__name__)
+from core.config import settings, wire_services, perform_warmup
+from core.logging import get_logger
+logger = get_logger(__name__)
 
 
 def create_app():
