@@ -180,7 +180,8 @@ class RAGOrchestrator:
                 client=client,
                 query_vector=query_embedding,
                 top_k=top_k,
-                filter_=None
+                filter_=None,
+                mmr=True  # Enable MMR for diversity
             )
             
             # 4) Confidence gate (avoid hallucination)

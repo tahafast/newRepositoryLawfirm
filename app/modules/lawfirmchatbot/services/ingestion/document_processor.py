@@ -60,10 +60,11 @@ def process_document(file_path: str, filename: str, chunk_size: int = 1000) -> L
         # Get page count
         total_pages = _get_page_count_safe(file_path)
         
-        # Create text splitter
+        # Create text splitter with optimized chunking (900-1200 tokens ≈ 3600-4800 chars)
+        # Using 4000 chars as middle ground with 480 overlap (~120 tokens)
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=200,
+            chunk_size=4000,  # ~1000 tokens for better context
+            chunk_overlap=480,  # ~120 tokens overlap
             length_function=len,
             add_start_index=True,
             separators=["\n\n", "\n", " ", ""]

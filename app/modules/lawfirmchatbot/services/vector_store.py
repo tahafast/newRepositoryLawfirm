@@ -208,9 +208,10 @@ def search_similar(
     filter_: Optional[Dict] = None,
     # Legacy parameters for backward compatibility
     limit: Optional[int] = None,
-    score_threshold: Optional[float] = None
+    score_threshold: Optional[float] = None,
+    mmr: bool = False
 ):
-    """Search for similar vectors with retry logic and timeout handling."""
+    """Search for similar vectors with retry logic, timeout handling, and optional MMR."""
     # Handle legacy parameters
     if limit is not None:
         top_k = limit
@@ -225,7 +226,8 @@ def search_similar(
             query_vector=query_vector, 
             limit=top_k, 
             with_payload=True, 
-            with_vectors=False
+            with_vectors=False,
+            timeout=4  # 4s timeout for search
         )
         
         if vname:
@@ -234,8 +236,16 @@ def search_similar(
             kwargs["query_filter"] = filt
         if score_threshold is not None:
             kwargs["score_threshold"] = score_threshold
+        
+        # Use MMR for diversity if requested (fetch more, then diversify)
+        if mmr:
+            kwargs["limit"] = min(top_k * 3, 24)  # Fetch 3x for MMR diversity
             
         hits = client.search(**kwargs)
+        
+        # Apply simple MMR diversification if requested
+        if mmr and len(hits) > top_k:
+            hits = _apply_mmr(hits, top_k)
         
         # For backward compatibility, return the old format when called with legacy parameters
         if limit is not None or score_threshold is not None:
@@ -251,7 +261,48 @@ def search_similar(
         
         return hits
     
-    return _retry_with_backoff(_search, timeout=30.0)
+    return _retry_with_backoff(_search, timeout=4.0)
+
+
+def _apply_mmr(hits, top_k: int, lambda_param: float = 0.5):
+    """Apply Maximal Marginal Relevance to diversify results."""
+    if not hits or len(hits) <= top_k:
+        return hits
+    
+    selected = [hits[0]]  # Start with highest scoring
+    candidates = hits[1:]
+    
+    while len(selected) < top_k and candidates:
+        best_score = float('-inf')
+        best_idx = 0
+        
+        for i, candidate in enumerate(candidates):
+            # Relevance score (normalized)
+            relevance = candidate.score
+            
+            # Simple diversity: penalize if payload text is too similar to selected
+            max_similarity = 0.0
+            cand_text = (candidate.payload or {}).get("text", "")
+            for sel in selected:
+                sel_text = (sel.payload or {}).get("text", "")
+                # Simple word overlap similarity
+                if cand_text and sel_text:
+                    cand_words = set(cand_text.lower().split())
+                    sel_words = set(sel_text.lower().split())
+                    if cand_words and sel_words:
+                        overlap = len(cand_words & sel_words) / len(cand_words | sel_words)
+                        max_similarity = max(max_similarity, overlap)
+            
+            # MMR formula: lambda * relevance - (1-lambda) * max_similarity
+            mmr_score = lambda_param * relevance - (1 - lambda_param) * max_similarity
+            
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx = i
+        
+        selected.append(candidates.pop(best_idx))
+    
+    return selected
 
 
 # Legacy wrapper functions - delegate to new hardened versions
