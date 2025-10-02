@@ -325,9 +325,18 @@ INSTRUCTIONS:
         """
         # Retrieve more candidates for strategy decision
         k = 8
-        initial_chunks = await search_similar_documents(query, k=k)
+        # search_similar_documents now returns a tuple: (documents, unique_sources, unique_pages)
+        search_result = await search_similar_documents(query, k=k)
+        
+        # Unpack the tuple
+        if isinstance(search_result, tuple):
+            initial_chunks, _, _ = search_result
+        else:
+            # Fallback for backwards compatibility
+            initial_chunks = search_result
+        
         total_hits = len(initial_chunks)
-        scores = [float(getattr(ch, "score", 0.0) or ch.metadata.get("score", 0.0)) for ch in initial_chunks]
+        scores = [float(ch.metadata.get("similarity_score", 0.0)) for ch in initial_chunks]
         strong_hits = sum(1 for s in scores if s >= 0.25)
         max_score = max(scores) if scores else 0.0
 

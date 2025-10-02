@@ -262,8 +262,7 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
             query_vector=query_embedding,
             top_k=k,
             filter_=None,
-            score_threshold=threshold,
-            timeout=settings.QDRANT_SEARCH_TIMEOUT_SECS
+            score_threshold=threshold
         )
         
         # Light observability: after search
@@ -278,8 +277,7 @@ async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: 
                 query_vector=query_embedding,
                 top_k=k,
                 filter_=None,
-                score_threshold=threshold * 0.5,
-                timeout=settings.QDRANT_SEARCH_TIMEOUT_SECS
+                score_threshold=threshold * 0.5
             )
         
         # Use safe hit normalizer to prevent NoneType subscript errors
