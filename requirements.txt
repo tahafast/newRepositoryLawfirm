@@ -40,3 +40,9 @@ aiohttp>=3.10.5
 # sentence-transformers==2.2.2
 # transformers==4.36.0
 # torch==2.1.0
+
+# Chat Memory Dependencies
+sqlalchemy[asyncio]>=2.0.0
+aiosqlite>=0.19.0  # SQLite async support
+asyncpg>=0.29.0  # PostgreSQL async support (optional)
+redis[hiredis]>=5.0.0  # Redis async support (optional)
