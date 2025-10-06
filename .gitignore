@@ -27,3 +27,19 @@ __pycache__/
 Dockerfile
 .dockerignore
 
+# Documentation files (MD files)
+*.md
+
+# Database files
+*.sqlite
+*.db
+
+# Cache and temporary files
+*.cache
+*.tmp
+*.log
+
+# Check/utility scripts
+check_db.py
+scripts/
+

@@ -1,190 +1,683 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-  <meta http-equiv="Pragma" content="no-cache" />
-  <meta http-equiv="Expires" content="0" />
-  <title>Chat</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
+  <title>BRAG AI — Chat</title>
+  <link rel="stylesheet" href="./styles.css"/>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
-    .api-banner{margin:8px 0;padding:8px 12px;border-radius:10px;background:#2a1120;border:1px solid #5f2746;color:#ffc9d9;display:none}
-    .api-banner.ok{display:none}
-    .api-banner.err{display:block}
-    .assistant-card h2, .assistant-card h3 { margin: 12px 0 8px; }
-    .assistant-card p { margin: 8px 0; line-height: 1.5; }
-    .assistant-card ul { margin: 8px 0 8px 18px; }
-    .meta-row { margin: 6px 0; font-size: 0.92rem; opacity: 0.9; }
-    .bubble.assistant { position: relative; }
-    .bubble.assistant .answer-content { margin-bottom: 8px; }
+    :root {
+      --sidebar: #0f172a;
+      --panel: #0b1220;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --accent: #60a5fa;
+      --hover: #1e293b;
+      --border: #1f2937;
+    }
+
+    body {
+      margin: 0;
+      background: #0b1120;
+      color: var(--text);
+      font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+    }
+
+    .app {
+      display: flex;
+      height: 100vh;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 280px;
+      background: var(--sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sb-head {
+      padding: 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .sb-head .brand {
+      flex: 1;
+      font-weight: 600;
+      font-size: 0.95rem;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .sb-head .brand img {
+      width: 24px;
+      height: 24px;
+    }
+
+    .btn {
+      background: #111827;
+      border: 1px solid #374151;
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.875rem;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .btn:hover {
+      border-color: #4b5563;
+      background: #1f2937;
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #0b1120;
+      font-weight: 500;
+    }
+
+    .btn.primary:hover {
+      background: #3b82f6;
+      border-color: #3b82f6;
+    }
+
+    .conv-list {
+      overflow-y: auto;
+      padding: 8px;
+      flex: 1;
+    }
+
+    .conv {
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin: 4px 0;
+      cursor: pointer;
+      background: transparent;
+      border: 1px solid transparent;
+      transition: all 0.15s;
+      font-size: 0.9rem;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .conv:hover {
+      background: var(--hover);
+      border-color: #213044;
+    }
+
+    .conv.active {
+      background: var(--panel);
+      border-color: var(--accent);
+    }
+
+    .conv-title {
+      font-weight: 500;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      padding-right: 30px;
+    }
+
+    .conv-date {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    .delete-chat {
+      position: absolute;
+      top: 10px;
+      right: 8px;
+      background: #dc2626;
+      border: 1px solid #b91c1c;
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      opacity: 0;
+      transform: scale(0.8);
+      transition: all 0.2s;
+      z-index: 10;
+    }
+
+    .conv:hover .delete-chat {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    .delete-chat:hover {
+      background: #b91c1c;
+      border-color: #991b1b;
+    }
+
+    .streaming-cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1em;
+      background: var(--accent);
+      margin-left: 2px;
+      animation: blink 1s infinite;
+    }
+
+    @keyframes blink {
+      0%, 49% { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
+
+    /* Main content */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .chat-header {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--sidebar);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .chat-header h2 {
+      margin: 0;
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    .chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+      background: #0b1120;
+    }
+
+    .bubble {
+      max-width: 800px;
+      margin: 16px 0;
+      padding: 16px 18px;
+      border-radius: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      line-height: 1.6;
+    }
+
+    .bubble.user {
+      background: #0f172a;
+      margin-left: auto;
+      max-width: 600px;
+    }
+
+    .bubble.assistant {
+      background: var(--panel);
+    }
+
+    .bubble strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--accent);
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .bubble.user strong {
+      color: #a78bfa;
+    }
+
+    .assistant-card h2,
+    .assistant-card h3 {
+      margin: 12px 0 8px;
+    }
+
+    .assistant-card p {
+      margin: 8px 0;
+      line-height: 1.6;
+    }
+
+    .assistant-card ul {
+      margin: 8px 0 8px 18px;
+    }
+
+    .meta-row {
+      margin: 8px 0 0;
+      font-size: 0.85rem;
+      opacity: 0.8;
+      color: var(--muted);
+    }
+
+    .composer {
+      display: flex;
+      gap: 8px;
+      padding: 14px 20px;
+      border-top: 1px solid var(--border);
+      background: var(--sidebar);
+    }
+
+    textarea {
+      flex: 1;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      min-height: 48px;
+      max-height: 150px;
+      resize: vertical;
+      font-family: inherit;
+      font-size: 0.95rem;
+    }
+
+    textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #374151;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #4b5563;
+    }
+
+    .loading {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
-  <!-- Note: If you get CORS errors, enable CORS in your FastAPI backend with allow_origins=["*"] for local testing -->
-  <nav class="nav">
-    <div class="brand"><img src="./logo.svg" alt="BRAG AI"/><strong>Law Firm RAG</strong></div>
-    <span class="spacer"></span>
-    <a href="./index.html">Home</a>
-    <a href="./ingest.html">Ingest</a>
-    <button id="themeToggle" aria-label="Toggle color theme"><span class="icon" aria-hidden="true">🌙</span><span class="label">Dark</span></button>
-  </nav>
-  <div class="wrap">
-    <div class="card">
-      <div id="apiBanner" class="api-banner"></div>
-      <h2>Chat</h2>
-      <p class="muted">Ask questions. The backend will retrieve from Qdrant Cloud and generate an answer.</p>
-      <div id="history" class="list" style="margin:12px 0 16px"></div>
-      <div class="row">
-        <input id="q" type="text" placeholder="Type your question..." />
-        <button class="btn" id="send">Send</button>
-      </div>
-      <div style="margin-top:12px" class="muted">
-        Endpoint: <span class="chip" id="apiInfo"></span>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sb-head">
+      <div class="brand">
+        <img src="./logo.svg" alt="BRAG AI"/>
+        <span>BRAG AI</span>
       </div>
     </div>
-  </div>
-  <script type="module">
-    import { API_BASE, QUERY_ENDPOINT, postJSON, ping } from "./config.runtime.js?v=2025-09-16-1";
-    window.addEventListener("load", async ()=>{
-      const ok = await ping();
-      const b = document.getElementById("apiBanner");
-      if(b){ b.className = "api-banner " + (ok ? "ok" : "err"); b.textContent = ok ? "" : `⚠️ API unreachable at ${API_BASE}. Check Render service / CORS / env.`; }
-    });
-    const historyEl = document.getElementById("history");
-    const input = document.getElementById("q");
-    const sendBtn = document.getElementById("send");
-    document.getElementById("apiInfo").textContent = `POST ${QUERY_ENDPOINT}`;
+    <div class="sb-head" style="border-top: 1px solid var(--border); border-bottom: none;">
+      <button class="btn primary" id="newChat" style="flex: 1;">+ New Chat</button>
+      <button class="btn" id="refreshChats" title="Refresh conversations">↻</button>
+    </div>
+    <div class="conv-list" id="convList"></div>
+  </aside>
 
-    const key = "rag_chat_history_v1";
-    const load = () => JSON.parse(localStorage.getItem(key) || "[]");
-    const save = (arr) => localStorage.setItem(key, JSON.stringify(arr));
-    const render = () => {
-      historyEl.innerHTML = "";
-      for (const m of load()) {
-        const div = document.createElement("div");
-        div.className = `bubble ${m.role === "user" ? "user" : "assistant"}`;
-        if (m.role === "assistant" && m.isMarkdown) {
-          // Render markdown for assistant responses
-          div.innerHTML = `<strong>${m.role}</strong><br><div class="assistant-card answer-content"></div>`;
-          const answerBox = div.querySelector('.answer-content');
-          const html = marked.parse(m.content);
-          answerBox.innerHTML = html;
-          
-          // Add reference pages and document name if available
-          const pagesText = (m.referencedPages && m.referencedPages.length > 0)
-            ? m.referencedPages.join(", ")
-            : null;
-          const docText = m.documentName || null;
-          if (pagesText || docText) {
-            const metaDiv = document.createElement("div");
-            metaDiv.className = "meta-row";
+  <!-- Main chat area -->
+  <main class="main">
+    <div class="chat-header">
+      <h2>Chat</h2>
+      <div>
+        <a href="./index.html" class="btn" style="text-decoration: none; display: inline-block; padding: 6px 12px;">Home</a>
+        <a href="./ingest.html" class="btn" style="text-decoration: none; display: inline-block; padding: 6px 12px; margin-left: 8px;">Ingest</a>
+      </div>
+    </div>
+    <div class="chat" id="transcript"></div>
+    <div class="composer">
+      <textarea id="input" placeholder="Ask anything about your documents..." rows="1"></textarea>
+      <button class="btn primary" id="send">Send</button>
+    </div>
+  </main>
+  </div>
+
+  <script type="module">
+  import { API_BASE } from "./config.runtime.js?v=2025-09-16-1";
+
+  const API = API_BASE + '/api/v1/lawfirm';
+  let conversationId = localStorage.getItem('conversation_id') || null;
+  const userId = localStorage.getItem('user_id') || 'anon';
+
+  const convList = document.getElementById('convList');
+  const transcript = document.getElementById('transcript');
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+
+  function bubble(role, text, isMarkdown = false, referencedPages = null, documentName = null) {
+    const div = document.createElement('div');
+    div.className = 'bubble ' + (role === 'user' ? 'user' : 'assistant');
+    
+    const roleLabel = document.createElement('strong');
+    roleLabel.textContent = role;
+    div.appendChild(roleLabel);
+
+    if (role === 'assistant' && isMarkdown) {
+      const answerBox = document.createElement('div');
+      answerBox.className = 'assistant-card answer-content';
+      answerBox.innerHTML = marked.parse(text);
+      div.appendChild(answerBox);
+
+      // Add metadata
+      if (referencedPages || documentName) {
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'meta-row';
             const rows = [];
-            if (pagesText) rows.push(`<div><span id="refPages">REFERENCE PAGES: ${pagesText}</span></div>`);
-            if (docText) rows.push(`<div><span id="docName">DOCUMENT: ${docText}</span></div>`);
-            metaDiv.innerHTML = rows.join("");
+        if (referencedPages && referencedPages.length > 0) {
+          rows.push(`Reference pages: ${referencedPages.join(', ')}`);
+        }
+        if (documentName) {
+          rows.push(`Document: ${documentName}`);
+        }
+        metaDiv.textContent = rows.join(' • ');
             div.appendChild(metaDiv);
           }
         } else {
-          div.innerHTML = `<strong>${m.role}</strong><br><pre>${m.content}</pre>`;
-        }
-        historyEl.appendChild(div);
+      const content = document.createElement('div');
+      content.textContent = text;
+      div.appendChild(content);
+    }
+
+    transcript.appendChild(div);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function escapeHtml(str) {
+    return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  async function listConversations() {
+    try {
+      const r = await fetch(`${API}/conversations?user_id=${encodeURIComponent(userId)}`);
+      const data = await r.json();
+      convList.innerHTML = '';
+      
+      if (data.length === 0) {
+        const empty = document.createElement('div');
+        empty.style.padding = '16px';
+        empty.style.textAlign = 'center';
+        empty.style.color = 'var(--muted)';
+        empty.style.fontSize = '0.875rem';
+        empty.textContent = 'No conversations yet';
+        convList.appendChild(empty);
+        return;
       }
-      historyEl.scrollTop = historyEl.scrollHeight;
-    };
 
-    function streamAppend(container, fullText, speed=14) {
-      container.innerHTML = ""; const pre = document.createElement("pre"); container.appendChild(pre);
-      const cur = document.createElement("span"); cur.className="cursor"; container.appendChild(cur);
-      let i=0;
-      return new Promise(resolve=>{
-        const tick = () => {
-          // add chunk to reduce reflow
-          const chunk = fullText.slice(i, i+Math.max(1, Math.floor(fullText.length/200)));
-          pre.textContent += chunk; i += chunk.length;
-          historyEl.scrollTop = historyEl.scrollHeight;
-          if (i < fullText.length) setTimeout(tick, speed);
-          else { cur.remove(); resolve(); }
-        }; tick();
+      data.forEach(c => {
+        const item = document.createElement('div');
+        item.className = 'conv' + (c.id === conversationId ? ' active' : '');
+        
+        const title = document.createElement('div');
+        title.className = 'conv-title';
+        title.textContent = c.title || 'Untitled';
+        item.appendChild(title);
+
+        const date = document.createElement('div');
+        date.className = 'conv-date';
+        const d = new Date(c.created_at);
+        date.textContent = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+        item.appendChild(date);
+
+        // Delete button
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'delete-chat';
+        deleteBtn.innerHTML = '🗑️';
+        deleteBtn.title = 'Delete conversation';
+        deleteBtn.onclick = async (e) => {
+          e.stopPropagation();
+          if (confirm('Delete this conversation?')) {
+            await deleteConversation(c.id);
+          }
+        };
+        item.appendChild(deleteBtn);
+
+        item.onclick = async () => {
+          conversationId = c.id;
+          localStorage.setItem('conversation_id', conversationId);
+          await loadMessages();
+          await listConversations(); // Refresh to update active state
+        };
+        
+        convList.appendChild(item);
       });
+    } catch (e) {
+      console.error('Failed to list conversations:', e);
     }
+  }
 
-    async function ask() {
-      const q = input.value.trim(); if (!q) return;
-      input.value = ""; sendBtn.disabled = true;
-      const messages = load(); messages.push({ role:"user", content:q }); save(messages); render();
-      // placeholder assistant bubble
-      const bubble = document.createElement("div"); bubble.className = "bubble assistant"; bubble.innerHTML = "<strong>assistant</strong><br>";
-      const holder = document.createElement("div"); bubble.appendChild(holder); historyEl.appendChild(bubble); historyEl.scrollTop = historyEl.scrollHeight;
-      try {
-        const res = await postJSON(QUERY_ENDPOINT, { query:q });
-        if (res && res.success === false) {
-          await streamAppend(holder, `⚠️ ${res.answer}`);
-          messages.push({ role:"assistant", content:res.answer }); save(messages);
+  async function deleteConversation(convId) {
+    try {
+      await fetch(`${API}/conversations/${convId}`, {
+        method: 'DELETE'
+      });
+      
+      // If we deleted the current conversation, clear it
+      if (convId === conversationId) {
+        conversationId = null;
+        localStorage.removeItem('conversation_id');
+        transcript.innerHTML = '';
+        
+        // Load first available conversation or create new one
+        const r = await fetch(`${API}/conversations?user_id=${encodeURIComponent(userId)}`);
+        const convs = await r.json();
+        
+        if (convs.length > 0) {
+          conversationId = convs[0].id;
+          localStorage.setItem('conversation_id', conversationId);
+          await loadMessages();
         } else {
-          const content = res?.answer || "No response";
-          const pages = res?.metadata?.referenced_pages;
-          const doc = res?.metadata?.document;
-          
-          // For streaming, we'll show plain text, then replace with markdown on render
-          await streamAppend(holder, content);
-          
-          // Save with markdown flag and reference pages
-          messages.push({ 
-            role:"assistant", 
-            content,
-            isMarkdown: true,
-            referencedPages: Array.isArray(pages) && pages.length > 0 ? pages : null,
-            documentName: doc || null
-          }); 
-          save(messages);
+          await newConversation();
         }
-      } catch(e) {
-        console.error("Query error:", e);
-        await streamAppend(holder, `Error: ${e?.message || e}`);
-        messages.push({ role:"assistant", content:`Error: ${e?.message || e}`}); save(messages);
-      } finally { render(); sendBtn.disabled=false; }
+      }
+      
+      await listConversations();
+    } catch (e) {
+      console.error('Failed to delete conversation:', e);
+      alert('Failed to delete conversation. Please try again.');
     }
+  }
 
-    sendBtn.onclick = ask;
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter") ask(); });
-    render();
-  </script>
-  <script>
-(function(){
-  const STORAGE_KEY = "BRAG_THEME";
-  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  async function newConversation() {
+    try {
+      const r = await fetch(`${API}/conversations/new`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({user_id: userId})
+      });
+      const data = await r.json();
+      conversationId = data.conversation_id;
+      localStorage.setItem('conversation_id', conversationId);
+      transcript.innerHTML = '';
+      await listConversations();
+    } catch (e) {
+      console.error('Failed to create conversation:', e);
+    }
+  }
 
-  function paintToggle(mode){
-    const btn = document.getElementById('themeToggle'); if(!btn) return;
-    const icon = btn.querySelector('.icon'); const label = btn.querySelector('.label');
-    if(mode === 'dark'){ if(icon) icon.textContent='☀️'; if(label) label.textContent='Light'; btn.setAttribute('aria-pressed','true'); }
-    else { if(icon) icon.textContent='🌙'; if(label) label.textContent='Dark'; btn.setAttribute('aria-pressed','false'); }
+  async function loadMessages() {
+    if (!conversationId) {
+      await newConversation();
+      return;
+    }
+    
+    try {
+      const r = await fetch(`${API}/conversations/${conversationId}/messages`);
+      const data = await r.json();
+      transcript.innerHTML = '';
+      data.forEach(m => {
+        // Check if message has markdown metadata (for assistant messages)
+        const isMarkdown = m.role === 'assistant';
+        bubble(m.role, m.content, isMarkdown);
+      });
+    } catch (e) {
+      console.error('Failed to load messages:', e);
+    }
   }
-  function applyTheme(mode){
-    if(mode === 'dark') document.documentElement.setAttribute('data-theme','dark');
-    else document.documentElement.removeAttribute('data-theme');
-    localStorage.setItem(STORAGE_KEY, mode); paintToggle(mode);
-  }
-  function currentTheme(){
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if(saved==='light'||saved==='dark') return saved;
-    return prefersDark ? 'dark' : 'light';
-  }
-  const initMode = currentTheme(); applyTheme(initMode);
-  document.addEventListener('click', (e)=>{
-    if(e.target.closest && e.target.closest('#themeToggle')){
-      const mode = currentTheme()==='dark' ? 'light' : 'dark'; applyTheme(mode);
+
+  document.getElementById('newChat').onclick = newConversation;
+  document.getElementById('refreshChats').onclick = listConversations;
+
+  document.getElementById('send').onclick = send;
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
     }
   });
-  if(window.matchMedia){
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (ev)=>{
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if(saved!=='light' && saved!=='dark') applyTheme(ev.matches?'dark':'light');
-    });
+
+  // Streaming helper - displays text word by word
+  async function streamResponse(bubbleDiv, fullText) {
+    const contentDiv = bubbleDiv.querySelector('.answer-content') || bubbleDiv.querySelector('div:last-child');
+    if (!contentDiv) return;
+
+    const words = fullText.split(' ');
+    let displayedText = '';
+    
+    // Add cursor
+    const cursor = document.createElement('span');
+    cursor.className = 'streaming-cursor';
+    contentDiv.appendChild(cursor);
+
+    for (let i = 0; i < words.length; i++) {
+      displayedText += (i > 0 ? ' ' : '') + words[i];
+      
+      // Update content - use innerHTML for markdown-like formatting
+      contentDiv.innerHTML = displayedText.replace(/\n/g, '<br>');
+      contentDiv.appendChild(cursor);
+      
+      // Smooth scroll
+      transcript.scrollTop = transcript.scrollHeight;
+      
+      // Word-by-word delay (adjust speed here)
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+    
+    // Remove cursor and render final markdown
+    cursor.remove();
+    contentDiv.innerHTML = marked.parse(fullText);
   }
+
+  async function send() {
+    const text = input.value.trim();
+    if (!text) return;
+    
+    bubble('user', text);
+    input.value = '';
+    sendBtn.disabled = true;
+
+    if (!conversationId) await newConversation();
+
+    // Create assistant bubble with loading
+    const assistantDiv = document.createElement('div');
+    assistantDiv.className = 'bubble assistant';
+    const roleLabel = document.createElement('strong');
+    roleLabel.textContent = 'assistant';
+    assistantDiv.appendChild(roleLabel);
+    
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'assistant-card answer-content';
+    contentDiv.innerHTML = '<div style="display: flex; align-items: center; gap: 8px;"><span class="loading"></span><span>Thinking...</span></div>';
+    assistantDiv.appendChild(contentDiv);
+    
+    transcript.appendChild(assistantDiv);
+    transcript.scrollTop = transcript.scrollHeight;
+
+    try {
+      const body = {
+        query: text,
+        conversation_id: conversationId,
+        user_id: userId
+      };
+      
+      const r = await fetch(`${API}/query`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+      });
+      
+      const data = await r.json();
+
+      // Update conversation_id from response
+      if (data?.metadata?.conversation_id) {
+        conversationId = data.metadata.conversation_id;
+        localStorage.setItem('conversation_id', conversationId);
+      }
+
+      // Clear loading and stream response
+      const content = data?.answer || '[no answer]';
+      contentDiv.innerHTML = '';
+      
+      await streamResponse(assistantDiv, content);
+      
+      // Add metadata after streaming
+      const pages = data?.metadata?.referenced_pages;
+      const doc = data?.metadata?.document;
+      
+      if (pages || doc) {
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'meta-row';
+        const rows = [];
+        if (pages && pages.length > 0) {
+          rows.push(`Reference pages: ${pages.join(', ')}`);
+        }
+        if (doc) {
+          rows.push(`Document: ${doc}`);
+        }
+        metaDiv.textContent = rows.join(' • ');
+        assistantDiv.appendChild(metaDiv);
+      }
+      
+      // Refresh conversation list
+      await listConversations();
+    } catch (e) {
+      console.error('Query error:', e);
+      contentDiv.innerHTML = `Error: ${escapeHtml(e?.message || e)}`;
+    } finally {
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  // Initialize
+  (async function init() {
+    if (!conversationId) await newConversation();
+    await listConversations();
+    await loadMessages();
+    input.focus();
 })();
+
+  // Auto-resize textarea
+  input.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+  });
   </script>
 </body>
 </html>

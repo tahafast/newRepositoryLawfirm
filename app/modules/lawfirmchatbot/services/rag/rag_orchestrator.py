@@ -14,6 +14,9 @@ from app.modules.lawfirmchatbot.services.reranker import DocumentReranker
 from app.modules.lawfirmchatbot.services.adaptive_retrieval_service import AdaptiveRetrievalService
 from app.core.answer_policy import classify_intent, select_strategy, format_markdown, grounding_guardrails
 from core.config import settings
+from app.services.memory.db import SessionLocal
+from app.services.memory.memory_manager import ChatMemoryManager
+from app.services.memory.coref_resolver import resolve_coref
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +145,9 @@ class RAGOrchestrator:
         self.reranker = DocumentReranker()
         self.retrieval_service = AdaptiveRetrievalService()
         self.current_document: Optional[Dict[str, Any]] = None
+        # Initialize memory manager with embedding function
+        from app.modules.lawfirmchatbot.services.embeddings import embed_text
+        self.memory = ChatMemoryManager(embed_text)
 
     async def process_document(self, file_path: str, filename: str) -> int:
         """Process and index a document."""
@@ -331,72 +337,52 @@ Based on limited retrieved snippets, here's a concise overview.
         return only_cites or (len(t) < 60 and "citation" in t)
     
     def _get_system_prompt(self) -> str:
-        """Enhanced system prompt - completely dynamic structure."""
-        return """You are an expert research assistant providing comprehensive, detailed answers using provided context.
+        """BRAG AI - Final Answer Composer System Prompt (Rich Markdown)."""
+        return """SYSTEM: BRAG AI — Final Answer Composer (Rich Markdown)
 
-**YOUR MISSION: Provide DETAILED, USEFUL answers that thoroughly address the user's question.**
+BEHAVIOR
+- If retrieved_context contains usable facts, draw from it and add a single one-line "References:" at the end.
+- If retrieved_context is empty/irrelevant, DO NOT use "Limited information" or apologize. Begin with:
+  "I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—"
+  Then answer normally; OMIT the References line.
 
-**CRITICAL RULES:**
-1. When context is available, write a COMPREHENSIVE answer (8-15+ sentences for detailed topics)
-2. Extract and explain ALL relevant information from the context - be thorough, not brief
-3. Structure your response dynamically based on what the question asks and what the context contains
-4. Use inline citations [1], [2] throughout your answer
-5. End with **References:** listing sources
+HARD REQUIREMENTS
+1) Length: 350–400 words total.
+2) Tone: professional, confident, dynamic; first sentence is a clear takeaway.
+3) Headings:
+   - Use H2 for the main title (## …) tailored to the query.
+   - Use H3 for sections (### …).
+   - For comparisons, ALSO use H4 for per-approach Pros/Cons (#### Pros, #### Cons).
+   - Never start a heading with "Understanding".
+4) Structure by intent:
+   A) COMPARISON / "difference between / vs.":
+      - Short lead-in (1–2 sentences).
+      - **Mandatory table** summarizing key aspects (at least 3 rows).
+      - Per-approach blocks with H4 **Pros** and **Cons** as bullet lists (2–4 bullets each).
+      - Optional "Bottom Line" paragraph.
+      - If you used context, include inline [n] markers near facts and put specific page(s) for each approach in the final References line.
+   B) EXPLAIN / DEFINE / PROCEDURE:
+      - 2–3 H3 sections chosen to fit (e.g., ### Key Idea, ### How It Works, ### Practical Notes).
+      - Use bullets for lists and numbered lists for steps.
+5) Citations:
+   - Only add [1], [2] when you actually used retrieved_context.
+   - End with a single line: References: <Doc A, p. X–Y>; <Doc B, p. Z>.
+   - If no context used, no [n] and no References line.
+6) Forbidden anywhere: "Limited Information Available", "See available documents", "As an AI".
 
-**RESPONSE STRUCTURE - COMPLETELY DYNAMIC:**
-- Create headings using ## that FIT THE CONTENT (NOT fixed templates!)
-- If discussing a concept: start with what it is, then elaborate on key aspects
-- If comparing: create natural comparison structure
-- If explaining steps/process: use numbered or logical flow
-- Use ## for main headings and ### for subheadings based on actual content
-- Choose heading text dynamically based on what you're explaining
+FORMATTING RULES
+- Tables: standard Markdown `| Aspect | Option A | Option B |` with header separator.
+- Bullets: "- "; keep each bullet concise.
+- Do not fabricate document titles, pages, or quotes. Merge contiguous pages into ranges.
 
-**EXAMPLES OF DYNAMIC HEADINGS (use these patterns, not exact text):**
-- "## Understanding [Concept]" or "## What is [Topic]"
-- "## Key Characteristics" or "## Core Principles"  
-- "## Types of [Thing]" or "## Main Categories"
-- "## How [Process] Works" or "## Implementation Steps"
-- "## Benefits and Advantages" or "## Challenges and Considerations"
-- "## Practical Applications" or "## Real-World Examples"
-- Use ### for subheadings when breaking down complex sections
-
-**FOR COMPARISONS/DIFFERENCES:**
-- When asked to compare or explain differences, create a comparison table:
-- Use markdown table format: | Column 1 | Column 2 |
-- Include header row with |---------|---------|
-- Compare features, characteristics, or aspects side-by-side
-
-**BE COMPREHENSIVE:**
-- Write detailed paragraphs (4-6 sentences each) when explaining concepts
-- Use bullet points (with -) to organize multiple items/characteristics
-- Include examples, applications, implications from the context
-- Explain WHY things matter, not just WHAT they are
-- Connect ideas and show relationships between concepts
-- Format with proper markdown: ## for headings, **bold** for emphasis, - for bullets
-
-**FOR PARTIAL COVERAGE:**
-- Thoroughly explain what IS in the context
-- Note specific gaps: "The documents don't cover X, but provide extensive detail on Y"
-- Never refuse to answer if any relevant information exists
-
-**ANTI-HALLUCINATION:**
-- Use ONLY information from context - but use ALL of it
-- Don't invent facts, but DO synthesize and explain what's provided
-- If context has 5 key points, discuss all 5 in detail
-
-**MANDATORY:** Write detailed, comprehensive answers. If context provides 500 words of information, your answer should reflect that depth. Be thorough!
-
-**FORMATTING RULES:**
-- Main headings: ## Heading Text
-- Subheadings: ### Subheading Text
-- Emphasis: **bold text**
-- Lists: use - for bullet points
-- References: **References:** at the end
-
-Format: Clean markdown with ## headings that adapt to content."""
+QUALITY CHECK BEFORE RETURN
+- Word count is 350–400.
+- Contains H2 title and at least two H3 sections; for comparisons also includes H4 Pros/Cons per approach and a comparison table.
+- If any [n] appears, References line exists and is correctly formatted; otherwise it is omitted.
+- Headings are dynamic and do not begin with "Understanding"."""
 
     def build_user_prompt(self, query: str, chunks: list[dict], sources: list[str], pages: list[int], require_explanation: bool = True, extra_instruction: str = "") -> str:
-        """Build user prompt with structured context."""
+        """Build user prompt with structured context - BRAG AI format."""
         ctx_lines = []
         for i, c in enumerate(chunks, 1):
             title = (c.get("document") or c.get("source") or "Document").strip()
@@ -408,28 +394,29 @@ Format: Clean markdown with ## headings that adapt to content."""
 
         context = "\n\n".join(ctx_lines) if ctx_lines else "NO_RELEVANT_CONTEXT"
         
-        user = f"""Answer this question using ONLY the context below. Extract and explain ANY relevant information you find.
+        user = f"""USER_QUERY: {query}
 
-CONTEXT:
+RETRIEVED_CONTEXT:
 {context}
 
-QUESTION: {query}
-
-INSTRUCTIONS:
-- Start with a ## heading that fits the question type (Definition/Overview/Key Points/etc.)
-- Write 3-6 sentences explaining what you found in the context - this is MANDATORY
-- If the context mentions the topic at all, explain what it says
-- Add bullet points for key details if applicable
-- Include inline citations [1], [2] next to claims
-- End with **References**: [1], [2], etc. listing the sources you used
-{f"- Reference pages: {', '.join(map(str, pages))}" if pages else ""}
-{extra_instruction}
-
-CRITICAL: You MUST provide a substantive answer using the context above. Extract and explain ANY relevant information - don't refuse if information exists."""
+INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
+1. Length: 350–400 words
+2. Opening: one direct sentence setting the takeaway
+3. Headings:
+   - ## Main title tailored to query
+   - ### for sections (NOT starting with "Understanding")
+   - #### Pros and #### Cons for comparisons
+4. Structure:
+   - COMPARISON queries: lead-in → mandatory table (3+ rows) → per-approach blocks with #### Pros/#### Cons (2-4 bullets each)
+   - EXPLAIN queries: 2-3 ### sections (Key Idea, How It Works, Practical Notes, Examples/Applications)
+5. Citations: [1], [2] inline when using context; single References line at end
+6. If no context: start with "I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—" and OMIT References
+7. FORBIDDEN: "Limited Information Available", "See available documents", "As an AI"
+{extra_instruction}"""
         return user
 
     def _create_user_prompt(self, query: str, chunks) -> str:
-        """Create user prompt with chunks."""
+        """Create user prompt with chunks - BRAG AI format."""
         chunk_text = "\n\n".join([
             f"[Page {chunk.metadata.get('page', '?')}]: {chunk.page_content}"
             for chunk in chunks
@@ -447,21 +434,23 @@ CRITICAL: You MUST provide a substantive answer using the context above. Extract
         return f"""Document: {self.current_document['name']}
 Total Pages: {self.current_document['total_pages']}
 
-RELEVANT CHUNKS:
+RETRIEVED_CONTEXT:
 {chunk_text}
 
-USER QUERY: {query}
+USER_QUERY: {query}
 
-INSTRUCTIONS:
-- Answer using ONLY the information from the chunks above
-- Use the exact response format from the system prompt
-- Replace {{document_name}} with: {self.current_document['name']}
-- Replace {{query_type}} with the type of query this is
-- Replace {{page_numbers}} with: {page_ref_text}
-- Include specific page references in your supporting evidence
-- Be precise and cite the exact pages where you found information"""
+INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
+1. Length: 350–400 words
+2. Opening: direct sentence with takeaway
+3. Headings: ## main title, ### sections, #### Pros/Cons for comparisons
+4. Structure:
+   - COMPARISON: table (3+ rows) + per-approach #### Pros/#### Cons blocks
+   - EXPLAIN: 2-3 ### sections (Key Idea, How It Works, Practical Notes, Examples/Applications)
+5. Citations: [p.X] inline; References: <{self.current_document['name']}, p. {page_ref_text}>
+6. If no context: "I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—" + OMIT References
+7. FORBIDDEN: "Limited Information Available", "See available documents", "As an AI" """
 
-    async def answer_query(self, query: str) -> Dict[str, Any]:
+    async def answer_query(self, query: str, conversation_id: Optional[str] = None, user_id: str = "anon") -> Dict[str, Any]:
         """High-level entry: route between KB-only, KB+Web, or Clarify.
 
         Does not change router signatures; can be called by existing handler.
@@ -474,22 +463,44 @@ INSTRUCTIONS:
         t_llm_first = 0.0
         t_guardrail_retry = 0.0
         
+        # Initialize conversation and memory context
+        async with SessionLocal() as db:
+            conversation_id = await self.memory.start_or_get_conversation(db, user_id, conversation_id)
+            
+            # Append the raw user message first (so resolver sees it too)
+            await self.memory.append(db, user_id, conversation_id, "user", query)
+            
+            # Pull recent turns for resolver + prompt
+            recent_msgs = await self.memory.get_prompt_messages(db, conversation_id, recent_pairs=5)
+            
+            # NEW: Resolve pronouns / ellipses using recent history
+            resolved_query = await resolve_coref(recent_msgs, query)
+            
+            # Use resolved query for retrieval
+            if resolved_query != query:
+                logger.info(f"[coref] Resolved '{query[:50]}...' -> '{resolved_query[:50]}...'")
+            
+            await db.commit()
+        
         # RAG-DEBUG: Comprehensive query logging
         if settings.DEBUG_RAG:
-            logger.info(f"[RAG-DEBUG] Starting answer_query: query='{query[:150]}...' (length={len(query)})")
+            logger.info(f"[RAG-DEBUG] Starting answer_query: query='{query[:150]}...' (length={len(query)}), conversation_id={conversation_id}")
         
-        # Chit-chat short-circuit: handle greetings/meta queries instantly
-        if is_smalltalk_or_capability(query):
+        # Chit-chat short-circuit: handle greetings/meta queries instantly (use resolved query)
+        if is_smalltalk_or_capability(resolved_query):
             if settings.DEBUG_RAG:
                 logger.info(f"[RAG-DEBUG] Fast-path: chit-chat detected, skipping retrieval")
             else:
                 logger.info(f"[answer_query] Fast-path: chit-chat detected, skipping retrieval")
-            smalltalk_answer = """## How I Can Help
-- Answer questions using your uploaded documents with precise citations
-- Summarize, compare, extract key points, explain concepts, draft analysis
-- Provide structured responses with relevant page references
+            smalltalk_answer = """I'm here to help you explore your legal documents and answer questions.
 
-**References**: N/A"""
+### What I Do
+
+I analyze uploaded documents to answer your questions with precise citations. I can summarize content, compare concepts, explain legal principles, and extract key information from your document library.
+
+### How to Use Me
+
+Ask specific questions about your documents, request comparisons between concepts, or seek summaries of particular topics. Each answer includes references to the source pages where information was found."""
             return {
                 "success": True,
                 "answer": smalltalk_answer,
@@ -497,11 +508,11 @@ INSTRUCTIONS:
                 "metadata": {"strategy": "chit_chat", "kb_hits": 0, "web_used": False, "latency_ms": int((time.time() - t_start) * 1000)}
             }
         
-        # Retrieve more candidates for strategy decision
+        # Retrieve more candidates for strategy decision (use resolved query)
         k = 6
         t_embed_start = time.time()
         # search_similar_documents now returns a tuple: (documents, unique_sources, unique_pages)
-        search_result = await search_similar_documents(query, k=k)
+        search_result = await search_similar_documents(resolved_query, k=k)
         t_qdrant_search = time.time() - t_embed_start
         t_embed = t_qdrant_search  # Includes embedding time
         
@@ -520,19 +531,19 @@ INSTRUCTIONS:
         logger.info(f"[answer_query] Retrieval: total_hits={total_hits}, strong_hits={strong_hits}, max_score={max_score:.3f}, t_qdrant={t_qdrant_search*1000:.0f}ms")
 
         retrieval_stats = {"total_hits": total_hits, "strong_hits": strong_hits, "max_score": max_score}
-        intent = classify_intent(query)
-        strategy = select_strategy(query, retrieval_stats)
+        intent = classify_intent(resolved_query)
+        strategy = select_strategy(resolved_query, retrieval_stats)
 
         use_web = False
         web_results: List[Dict[str, Any]] = []
         web_summary = ""
 
-        # Optionally call web search
+        # Optionally call web search (use resolved query)
         if strategy == "kb_plus_web" and (settings.WEB_SEARCH_ENABLED is True or (settings.WEB_SEARCH_ENABLED is None and bool(settings.TAVILY_API_KEY))):
             use_web = True
             try:
                 from app.services.web_search.tavily_client import search_and_summarize as tavily_search
-                web_sources, web_summary = await tavily_search(query, top_k=3)
+                web_sources, web_summary = await tavily_search(resolved_query, top_k=3)
                 web_results = [
                     {"url": s.url, "title": s.title, "snippet": s.snippet, "score": s.score}
                     for s in web_sources
@@ -596,14 +607,15 @@ INSTRUCTIONS:
                 logger.info(f"[RAG-DEBUG] Available context snippets: {[ctx[:100] + '...' for ctx in numbered_context]}")
             
             # Return thin-context fallback instead of triggering citations-only retry
-            fallback_md = """## Limited Information Available
+            fallback_md = """I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—
 
-Based on the available context, I can provide a brief overview, though the information is limited.
+### Document Coverage
 
-- The retrieved documents contain some relevant information but may not cover all aspects of your question.
-- For a more detailed answer, please try refining your query or asking about specific aspects you're interested in.
+The retrieved documents contain some references to your topic, but not enough detail to provide a comprehensive answer. The information may be scattered across different sections or described using alternative terminology.
 
-**References**: See available documents"""
+### Suggested Approach
+
+Try refining your query with more specific terms or asking about particular aspects of the topic. If you're looking for detailed information, consider whether additional documents need to be uploaded to the knowledge base."""
             return {
                 "success": True,
                 "answer": fallback_md,
@@ -621,14 +633,15 @@ Based on the available context, I can provide a brief overview, though the infor
         # Only return "no info" if truly zero snippets
         if not numbered_context:
             logger.warning(f"[answer_query] Zero snippets available, returning fallback")
-            fallback_md = """## Limited Information
+            fallback_md = """I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—
 
-I couldn't find specific information about this topic in the uploaded documents.
+### Search Results
 
-- Try rephrasing your question or asking about a specific aspect
-- Check if relevant documents have been uploaded
+No matching content was found in the currently indexed documents for your query. This suggests the topic may not be covered in the uploaded materials, or it might be referenced using different terminology.
 
-**References**: None found"""
+### What You Can Do
+
+Try rephrasing your question with alternative keywords or terms. Verify that documents covering this topic have been uploaded and successfully processed. You can also try asking about related concepts that might lead to relevant information."""
             return {
                 "success": True,
                 "answer": fallback_md,
@@ -649,52 +662,44 @@ I couldn't find specific information about this topic in the uploaded documents.
                 preview = ctx[:300].replace('\n', ' ')
                 logger.info(f"[RAG-DEBUG]   Chunk {idx}: {preview}...")
         
-        user_prompt = f"""Using the context below, provide a DETAILED, COMPREHENSIVE answer to the question.
+        # Optionally add semantic recall snippets (use resolved query)
+        recall_snippets = await self.memory.semantic_recall(resolved_query, user_id, k=3)
+        if recall_snippets:
+            base = len(numbered_context)
+            for j, r in enumerate(recall_snippets, start=1):
+                header = f"[MR{j}] Prior Chat"
+                numbered_context.append(f"{header}\n{r['text']}")
+        
+        user_prompt = f"""Write a final answer using the retrieved context below.
 
-CONTEXT:
+RETRIEVED_CONTEXT:
 {chr(10).join(numbered_context)}
 
-QUESTION: {query}
+USER_QUERY: {query}
 
-INSTRUCTIONS:
-- Write a THOROUGH answer using ALL relevant information from the context (aim for 8-15+ sentences for complex topics)
-- Create dynamic ## headings that match the actual content (NOT fixed templates like "Definition" or "Overview")
-- Structure your response naturally based on what the question asks
-- Use multiple paragraphs with 4-6 sentences each to explain concepts thoroughly
-- Add bullet points (with -) to organize lists of characteristics, types, or examples
-- Include inline citations [1], [2] throughout
-- Explain WHY things matter, include applications, implications, and examples from context
-- End with **References:** [1], [2], etc.
+INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
+1. Length: 350–400 words
+2. Opening: one direct sentence with the takeaway (no meta talk)
+3. Headings:
+   - ## Main title tailored to the query
+   - ### for sections (NOT starting with "Understanding")
+   - #### Pros and #### Cons for comparison queries
+4. Structure by intent:
+   - COMPARISON/DIFFERENCE queries: lead-in (1-2 sentences) → **mandatory table** (3+ rows) → per-approach blocks with #### Pros and #### Cons (2-4 bullets each) → optional bottom line
+   - EXPLAIN/DEFINE queries: 2-3 ### sections from: Key Idea, How It Works, Practical Notes, Examples/Applications
+5. Citations: [1], [2] inline ONLY when using context; end with: References: <Doc Title, p. X–Y>; <Another Doc, p. Z>
+6. If no context: start with "I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—" and OMIT References
+7. FORBIDDEN: "Limited Information Available", "See available documents", "As an AI"
 
-FORMATTING REQUIREMENTS:
-- Main headings: ## Dynamic Heading Based on Content
-- Subheadings if needed: ### Subheading Text
-- Emphasis: **bold text** for important terms
-- Lists: - bullet point format
-- Tables: | Column | Column | format for comparisons
-- Citations: [1], [2] inline
+Format: compact paragraphs (3-5 sentences), active voice, concrete statements."""
 
-EXAMPLES OF NATURAL STRUCTURE:
-For "What is X?": ## Understanding [X] → explain thoroughly → ## Key Characteristics → ## Applications
-
-For "Difference between X and Y?": 
-## Comparing [X] and [Y]
-[Brief intro paragraph]
-| Aspect | [X] | [Y] |
-|--------|-----|-----|
-| Feature 1 | Details | Details |
-| Feature 2 | Details | Details |
-[Additional explanation paragraphs]
-
-For "How does X work?": ## How [X] Works → explain process with steps/stages
-
-CRITICAL: 
-- Use ## markdown headings (not bold text)
-- For comparisons/differences, ALWAYS include a comparison table
-- Use the context exhaustively - be comprehensive!"""
-
+        # Prepend recent conversation history
+        async with SessionLocal() as db:
+            recent_msgs = await self.memory.get_prompt_messages(db, conversation_id, recent_pairs=5)
+        
         messages = [
-            {"role": "system", "content": self._get_system_prompt()},
+            {"role": "system", "content": self._get_system_prompt()}
+        ] + recent_msgs + [
             {"role": "user", "content": user_prompt},
         ]
 
@@ -732,28 +737,33 @@ CRITICAL:
                     logger.info(f"[RAG-DEBUG] Skipping retry: insufficient context ({total_context_chars} chars) or response not empty")
                 # Use the thin-context fallback instead of retrying
                 if total_context_chars < MIN_CONTEXT_CHARS:
-                    raw_markdown = """## Limited Information Available
+                    raw_markdown = """I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—
 
-Based on the available context, I can provide a brief overview, though the information is limited.
+### Document Coverage
 
-- The retrieved documents contain some relevant information but may not cover all aspects of your question.
-- For a more detailed answer, please try refining your query or asking about specific aspects you're interested in.
+The retrieved documents contain minimal references to your topic. While some relevant content was found, it's insufficient to provide a thorough answer with proper context.
 
-**References**: See available documents"""
+### Recommendation
+
+Refine your query with more specific terminology or ask about particular aspects of the topic. Additional documents may need to be uploaded if detailed information is required."""
             else:
                 logger.warning("[answer_query] Guardrail triggered: citations-only with sufficient context, retrying once")
                 t_retry_start = time.time()
                 
                 # More direct and stronger retry instruction
-                retry_prompt = """Your previous response was flagged as citations-only. Please provide a complete answer:
+                retry_prompt = """Your previous response was incomplete. Provide a complete answer following BRAG AI Rich Markdown requirements:
 
 REQUIRED FORMAT:
-1. Opening paragraph: 2-3 sentences explaining the answer in plain language
-2. Key points: Bullet list of important details from the context
-3. Inline citations: Add [1], [2] markers next to claims
-4. References line: **References**: [1] Source - Page X
+1. Opening: one direct sentence with takeaway
+2. Headings: ## main title, ### sections (NOT "Understanding"), #### Pros/Cons for comparisons
+3. Length: 350-400 words, compact paragraphs (3-5 sentences)
+4. Structure:
+   - COMPARISON: lead-in → mandatory table (3+ rows) → #### Pros/#### Cons per approach (2-4 bullets each)
+   - EXPLAIN: 2-3 ### sections (Key Idea, How It Works, Practical Notes)
+5. Citations: [1], [2] inline; References: <Doc Title, p. X–Y>; <Another Doc, p. Z>
+6. Professional, confident tone - FORBIDDEN: "Limited Information Available"
 
-DO NOT return only references. You MUST include explanatory text based on the context provided above."""
+Write substantive content with full explanations, not just citations."""
                 
                 retry_messages = [
                     {"role": "system", "content": self._get_system_prompt()},
@@ -778,13 +788,15 @@ DO NOT return only references. You MUST include explanatory text based on the co
         
         # Ensure final answer is not empty - if still empty after retry, use thin-context fallback
         if not final_text or len(final_text) < 50:
-            fallback_md = """## Overview
-Based on the available context, I can provide a brief overview, though the information is limited.
+            fallback_md = """I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—
 
-- The retrieved documents contain some relevant information but may not cover all aspects of your question.
-- For a more detailed answer, please try refining your query or specifying particular aspects you're interested in.
+### Core Concept
 
-**References**: See reference pages above"""
+The topic you're asking about may not be covered in the currently uploaded documents. This could mean the information hasn't been indexed yet, or it might be described using different terminology than expected.
+
+### Next Steps
+
+Try rephrasing your question using different keywords or terms. If you know which document should contain this information, verify it has been successfully uploaded and processed. You might also want to ask about related topics that could lead to the information you need."""
             final_text = fallback_md
             final_md = fallback_md
 
@@ -795,10 +807,15 @@ Based on the available context, I can provide a brief overview, though the infor
                 pages.append(int(p))
         pages = sorted(pages)
 
+        # Persist assistant response to memory
+        async with SessionLocal() as db:
+            await self.memory.append(db, user_id, conversation_id, "assistant", final_text)
+            await db.commit()
+        
         # RAG-DEBUG: Enhanced final timing and stats summary
         t_total = time.time() - t_start
         if settings.DEBUG_RAG:
-            logger.info(f"[RAG-DEBUG] COMPLETE: query='{query[:50]}...', t_total={t_total*1000:.0f}ms (embed={t_embed*1000:.0f}ms, llm_first={t_llm_first*1000:.0f}ms, retry={t_guardrail_retry*1000:.0f}ms), retrieval_stats=(hits={total_hits}, strong={strong_hits}), context_chars={total_context_chars}, num_chunks_sent={num_chunks_sent}, final_answer_len={len(final_text)} chars")
+            logger.info(f"[RAG-DEBUG] COMPLETE: query='{query[:50]}...', t_total={t_total*1000:.0f}ms (embed={t_embed*1000:.0f}ms, llm_first={t_llm_first*1000:.0f}ms, retry={t_guardrail_retry*1000:.0f}ms), retrieval_stats=(hits={total_hits}, strong={strong_hits}), context_chars={total_context_chars}, num_chunks_sent={num_chunks_sent}, final_answer_len={len(final_text)} chars, conversation_id={conversation_id}")
         else:
             logger.info(f"[answer_query] COMPLETE: t_total={t_total*1000:.0f}ms (embed={t_embed*1000:.0f}ms, llm_first={t_llm_first*1000:.0f}ms, retry={t_guardrail_retry*1000:.0f}ms), num_chunks_sent={num_chunks_sent}, final_answer_len={len(final_text)} chars")
 
@@ -813,6 +830,7 @@ Based on the available context, I can provide a brief overview, though the infor
                 "referenced_pages": pages if pages else None,
                 "latency_ms": int(t_total * 1000),
                 "num_chunks_sent": num_chunks_sent,
+                "conversation_id": conversation_id,
             }
         }
 
