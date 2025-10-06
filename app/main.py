@@ -70,6 +70,16 @@ async def startup_event():
     """Application startup event handler."""
     logger.info("Starting Law Firm Chatbot API...")
     
+    # Initialize database tables
+    try:
+        from app.services.memory.init_db import init_database
+        logger.info("Initializing chat memory database...")
+        await init_database()
+        logger.info("Chat memory database initialized successfully")
+    except Exception as e:
+        logger.warning(f"Failed to initialize chat memory database: {e}")
+        logger.warning("Chat memory features may not work properly")
+    
     # Optional HTTP wire logging for debugging
     if settings.LOG_QDRANT_HTTP == "1":
         logging.getLogger("httpx").setLevel(logging.INFO)
