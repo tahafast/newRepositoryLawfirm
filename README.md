@@ -1,4 +1,4 @@
-# Enhanced Law Firm Chatbot
+# Law Firm Chatbot
 
 An advanced RAG (Retrieval-Augmented Generation) system designed specifically for legal document analysis and querying. This chatbot provides intelligent legal analysis with document upload capabilities and smart query processing.
 
