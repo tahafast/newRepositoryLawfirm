@@ -2,7 +2,7 @@ from typing import Iterable, List, Dict, Any, Optional
 import time
 import logging
 from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams, PointStruct
+from qdrant_client.http.models import Distance, VectorParams, PointStruct, HnswConfigDiff, PayloadSchemaType
 from langchain.schema import Document
 from core.config import settings
 
@@ -13,33 +13,40 @@ logger = logging.getLogger("qdrant.client")
 _ALIAS_ENABLED = True  # flipped off if alias ops unsupported/fail
 
 
-_qdrant: QdrantClient | None = None
+_qdrant_client = None
+
+
+def get_qdrant_client():
+    global _qdrant_client
+    if _qdrant_client: return _qdrant_client
+
+    # Initialize Qdrant client with compatible parameters
+    client_kwargs = {
+        "url": settings.QDRANT_URL,
+        "api_key": settings.QDRANT_API_KEY,
+        "timeout": settings.QDRANT_TIMEOUT_S,
+    }
+    
+    # Only add prefer_grpc if gRPC is enabled (some versions don't support grpc parameter)
+    if settings.QDRANT_USE_GRPC:
+        client_kwargs["prefer_grpc"] = True
+    
+    _qdrant_client = QdrantClient(**client_kwargs)
+
+    # Ensure indexes for payload fields
+    try:
+        _qdrant_client.create_payload_index(settings.QDRANT_COLLECTION, field_name="document", field_schema=PayloadSchemaType.keyword)
+    except Exception: pass
+    try:
+        _qdrant_client.create_payload_index(settings.QDRANT_COLLECTION, field_name="page", field_schema=PayloadSchemaType.integer)
+    except Exception: pass
+
+    return _qdrant_client
 
 
 def get_qdrant() -> QdrantClient:
-    global _qdrant
-    if _qdrant is None:
-        if settings.QDRANT_MODE == "embedded":
-            _qdrant = QdrantClient(path="./qdrant_data")
-        else:
-            _qdrant = QdrantClient(
-                url=settings.QDRANT_URL,
-                api_key=settings.QDRANT_API_KEY or None,
-                timeout=30.0
-            )
-        _ensure_collection(_qdrant)
-    return _qdrant
-
-
-def get_qdrant_client() -> QdrantClient:
-    """Get Qdrant client based on settings."""
-    if settings.QDRANT_MODE == "embedded":
-        return QdrantClient(path="./qdrant_data")
-    return QdrantClient(
-        url=settings.QDRANT_URL,
-        api_key=(settings.QDRANT_API_KEY or None),
-        timeout=30.0,
-    )
+    """Legacy function for backward compatibility."""
+    return get_qdrant_client()
 
 
 def _physical_name() -> str:

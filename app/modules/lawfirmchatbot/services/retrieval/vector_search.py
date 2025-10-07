@@ -9,12 +9,13 @@ import uuid
 import typing as t
 
 from app.modules.lawfirmchatbot.services.vector_store import get_qdrant, search_similar, upsert_embeddings
-from app.modules.lawfirmchatbot.services.embeddings import embed_text, embed_texts_batch
+from app.modules.lawfirmchatbot.services.llm import embed_text_async
+from core.config import settings
+from core.utils.perf import profile_stage
 
 logger = logging.getLogger(__name__)
 
 # -------- Retrieval tuning & lightweight cache --------
-from core.config import settings
 
 TOP_K = min(getattr(settings, "QDRANT_TOP_K_DEFAULT", 8), 8)
 FETCH_K = settings.QDRANT_TOP_K_LONG_QUERY
@@ -204,10 +205,13 @@ async def add_documents_to_vector_store(documents: List[Document]) -> int:
             
             logger.info(f"Processing document batch {batch_num}/{total_batches} ({len(batch)} documents)")
             
-            # Generate embeddings for batch using the new batch function
+            # Generate embeddings for batch using the optimized function
             texts = [doc.page_content for doc in batch]
             try:
-                embeddings = await embed_texts_batch(texts)
+                embeddings = []
+                for text in texts:
+                    embedding = await embed_text_async(text)
+                    embeddings.append(embedding)
                 logger.info(f"Generated {len(embeddings)} embeddings for batch {batch_num}")
             except Exception as e:
                 logger.error(f"Batch embedding failed for batch {batch_num}: {e}")
@@ -254,155 +258,71 @@ async def add_documents_to_vector_store(documents: List[Document]) -> int:
         raise
 
 
-async def search_similar_documents(query: str, k: int = TOP_K, score_threshold: float = None) -> tuple[List[Document], list[str], list[int]]:
-    """
-    Search for similar documents with optimized deduplication and fast retrieval.
-    
-    Returns:
-        tuple: (documents, unique_sources, unique_pages)
-    """
-    try:
-        from core.config import settings
-        client = get_qdrant()
-        k = max(1, k)
-        threshold = score_threshold or MIN_SCORE
-        nq = _normalize_query(query)
-        ck = (nq, k, threshold)
-        cached = _cache_get(ck)
-        if cached is not None:
-            if settings.DEBUG_RAG:  # RAG-DEBUG: Cache hit logging
-                logger.info(f"[RAG-DEBUG] vector_search cache hit: top_k={k}, threshold={threshold:.3f}")
-            return cached
-        
-        # Generate query embedding
-        query_embedding = await embed_text(nq)
-        
-        # RAG-DEBUG: Enhanced retrieval logging
-        if settings.DEBUG_RAG:
-            logger.info(f"[RAG-DEBUG] Starting retrieval: query='{query[:100]}...', top_k={k}, threshold={threshold:.3f}, timeout={settings.QDRANT_SEARCH_TIMEOUT_SECS}s")
-        
-        import time
-        start_time = time.time()
-        
-        # Search with timeout and score threshold
-        results = search_similar(
-            client=client,
-            query_vector=query_embedding,
-            top_k=k,
-            filter_=None,
-            score_threshold=threshold
-        )
-        
-        # Enhanced observability with debug details
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        if settings.DEBUG_RAG:
-            logger.info(f"[RAG-DEBUG] Qdrant search completed: hits={len(results or [])}, elapsed={elapsed_ms}ms")
-        else:
-            logger.info(f"vector_search got hits={len(results or [])} in {elapsed_ms}ms")
-        
-        # If no results, retry with lower threshold
-        if not results:
-            logger.info("No results with threshold, retrying with lower threshold")
-            results = search_similar(
-                client=client,
-                query_vector=query_embedding,
-                top_k=k,
-                filter_=None,
-                score_threshold=threshold * 0.5
-            )
-        
-        # Use safe hit normalizer to prevent NoneType subscript errors
-        raw_hits = results
-        contexts = normalize_hits(raw_hits)
-        
-        # RAG-DEBUG: Log detailed chunk information
-        if settings.DEBUG_RAG and contexts:
-            logger.info(f"[RAG-DEBUG] Raw chunks retrieved: {len(contexts)}")
-            for i, ctx in enumerate(contexts[:10], 1):  # Log first 10 chunks
-                score = ctx.get("score", 0.0)
-                source = ctx.get("source", "unknown")
-                metadata = ctx.get("metadata", {})
-                page = metadata.get("page", "N/A")
-                text_snippet = (ctx.get("text", "")[:200] + "...") if len(ctx.get("text", "")) > 200 else ctx.get("text", "")
-                logger.info(f"[RAG-DEBUG] Chunk {i}: score={score:.3f}, source='{source}', page={page}, snippet='{text_snippet}'")
-        
-        # Additional filtering: remove low-score entries but ensure we keep at least 3-4 chunks
-        filtered = []
-        seen_doc_page = set()  # Track (doc, page) pairs for diversity
-        strong_hits = 0  # RAG-DEBUG: Count high-quality hits
-        
-        for ctx in contexts:
-            score = ctx.get("score")
-            # More lenient threshold: only drop if score is very low
-            if score is not None and score < (threshold * 0.5):
-                continue
-            
-            # RAG-DEBUG: Count strong hits
-            if score is not None and score >= 0.75:
-                strong_hits += 1
-            
-            # Light deduplication: skip exact (doc, page) duplicates but allow same doc different pages
-            doc_id = ctx.get("metadata", {}).get("document") or ctx.get("source")
-            page_id = ctx.get("metadata", {}).get("page")
-            dedup_key = (doc_id, page_id)
-            
-            if dedup_key in seen_doc_page:
-                continue
-            if doc_id:
-                seen_doc_page.add(dedup_key)
-            
-            filtered.append(ctx)
-            
-            # Stop after we have enough diversity
-            if len(filtered) >= k:
-                break
-        
-        # Ensure we always return at least 3 contexts if any exist
-        if len(filtered) < 3 and len(contexts) >= 3:
-            filtered = contexts[:3]
-        elif not filtered and contexts:
-            filtered = contexts[:1]
-        
-        contexts = filtered
-        
-        if not contexts:
-            logger.warning("no usable contexts from qdrant hits; hits=%d", len(raw_hits or []))
-            return [], [], []
-        
-        # Filter by score and deduplicate
-        filtered = []
-        for context in contexts:
-            score = context["score"] if context["score"] is not None else context["metadata"].get("similarity_score")
-            if score is None or float(score) >= threshold:
-                filtered.append(context)
+@profile_stage("vector_search")
+async def search_similar_documents(query: str, k: int | None = None, score_threshold: float | None = None):
+    """Faster but tolerant retrieval — allows partial results."""
+    k = k or settings.RETRIEVAL_TOP_K
+    score_threshold = score_threshold if score_threshold is not None else settings.RETRIEVAL_SCORE_THRESH
 
-        # Deduplicate chunks by (document_id, page_number)
-        deduplicated_chunks, unique_sources, unique_pages = _deduplicate_chunks(filtered[:k])
-        
-        # Convert to Documents
-        documents = []
-        total_context_chars = 0  # RAG-DEBUG: Track context size
-        for context in deduplicated_chunks:
-            doc = Document(
-                page_content=context["text"],
-                metadata=context["metadata"]
-            )
-            # Add similarity score for downstream processing
-            if context["score"] is not None:
-                doc.metadata["similarity_score"] = context["score"]
-            documents.append(doc)
-            total_context_chars += len(context["text"])
-        
-        # RAG-DEBUG: Comprehensive retrieval summary
-        if settings.DEBUG_RAG:
-            logger.info(f"[RAG-DEBUG] Retrieval summary: total_hits={len(contexts)}, strong_hits={strong_hits}, deduped_docs={len(documents)}, total_context_chars={total_context_chars}, unique_sources={len(unique_sources)}, unique_pages={unique_pages}")
-        else:
-            logger.info(f"Retrieved {len(documents)} deduplicated documents for query")
-        
-        result = (documents, unique_sources, unique_pages)
-        _cache_set(ck, result)
-        return result
-        
-    except Exception as e:
-        logger.error(f"Similarity search failed: {str(e)}", exc_info=True)
-        return [], [], []
+    client = get_qdrant()
+    vec = await embed_text_async(query)
+
+    # Use search parameters that are compatible with different Qdrant versions
+    search_kwargs = {
+        "collection_name": settings.QDRANT_COLLECTION,
+        "query_vector": vec,
+        "limit": k,
+        "with_payload": True,
+        "with_vectors": False,
+    }
+    
+    # Add search parameters if supported
+    try:
+        search_kwargs["search_params"] = {"hnsw_ef": settings.QDRANT_HNSW_EF, "exact": settings.QDRANT_EXACT}
+    except Exception:
+        # Fallback for older versions that don't support search_params
+        pass
+    
+    res = client.search(**search_kwargs)
+
+    # Remove hard early exit — return partials if available
+    if not res:
+        return ([], [], [])
+
+    # Keep partials even if scores are low, let LLM decide relevance
+    seen = set(); docs=[]; sources=set(); pages=set()
+    for p in res:
+        pl = p.payload or {}
+        doc = pl.get("document") or pl.get("source") or "Document"
+        page = pl.get("page")
+        key = (doc, page)
+        if key in seen: continue
+        seen.add(key)
+
+        class Obj: pass
+        o = Obj()
+        o.page_content = pl.get("text", "")
+        o.metadata = {
+            "document": doc,
+            "page": page,
+            "similarity_score": float(p.score)
+        }
+        docs.append(o)
+        sources.add(doc)
+        if isinstance(page, (int, float)): pages.add(int(page))
+
+    # Return all hits sorted by score (highest first)
+    docs.sort(key=lambda d: d.metadata.get("similarity_score", 0), reverse=True)
+    return (docs, list(sources), sorted(pages))
+
+
+async def warmup():
+    """Optional warmup function to run once at startup."""
+    from app.modules.lawfirmchatbot.services.llm import embed_text_async
+    from app.modules.lawfirmchatbot.services.vector_store import get_qdrant_client
+    try:
+        await embed_text_async("warmup")
+        client = get_qdrant_client()
+        client.search(collection_name=settings.QDRANT_COLLECTION, query_vector=[0.0]*settings.EMBED_MODEL_DIM, limit=1)
+    except Exception:
+        pass

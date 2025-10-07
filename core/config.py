@@ -4,6 +4,7 @@ Consolidated configuration settings and service wiring for the Law Firm Chatbot
 """
 
 import logging
+import os
 from typing import Optional
 from pydantic_settings import BaseSettings
 from fastapi import FastAPI, Request
@@ -11,6 +12,25 @@ from openai import AsyncOpenAI
 from qdrant_client import QdrantClient
 
 logger = logging.getLogger(__name__)
+
+def env_bool(key: str, default: bool) -> bool:
+    """Parse boolean environment variable."""
+    value = os.getenv(key, str(default)).lower()
+    return value in ('true', '1', 'yes', 'on')
+
+def env_int(key: str, default: int) -> int:
+    """Parse integer environment variable."""
+    try:
+        return int(os.getenv(key, str(default)))
+    except ValueError:
+        return default
+
+def env_float(key: str, default: float) -> float:
+    """Parse float environment variable."""
+    try:
+        return float(os.getenv(key, str(default)))
+    except ValueError:
+        return default
 
 class Settings(BaseSettings):
     DEBUG: bool = False
@@ -67,6 +87,17 @@ class Settings(BaseSettings):
     
     # RAG Debug Configuration
     DEBUG_RAG: bool = False  # Enable detailed RAG pipeline logging (set to True for debugging)
+    
+    # Performance Tuning Parameters
+    QDRANT_USE_GRPC: bool = env_bool("QDRANT_USE_GRPC", True)
+    QDRANT_HNSW_EF: int = env_int("QDRANT_HNSW_EF", 128)
+    QDRANT_EXACT: bool = env_bool("QDRANT_EXACT", False)
+    QDRANT_TIMEOUT_S: float = env_float("QDRANT_TIMEOUT_S", 3.0)
+    EMBED_CACHE_TTL_S: int = env_int("EMBED_CACHE_TTL_S", 86400)
+    EMBED_CACHE_MAX: int = env_int("EMBED_CACHE_MAX", 10000)
+    EMBED_MODEL_DIM: int = env_int("EMBED_MODEL_DIM", 1536)
+    RETRIEVAL_TOP_K: int = env_int("RETRIEVAL_TOP_K", 6)
+    RETRIEVAL_SCORE_THRESH: float = env_float("RETRIEVAL_SCORE_THRESH", 0.18)
 
     # Web Search
     WEB_SEARCH_ENABLED: bool | None = None  # default: enabled if TAVILY_API_KEY exists

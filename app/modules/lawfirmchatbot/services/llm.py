@@ -1,9 +1,79 @@
 from typing import List, Dict, Any
+import time
+import hashlib
+import httpx
 from openai import AsyncOpenAI
 from core.config import settings
+from core.utils.perf import profile_stage
 
+
+_HTTPX = httpx.AsyncClient(timeout=6, limits=httpx.Limits(max_keepalive_connections=20, max_connections=40))
+_EMBED_CACHE: dict[str, tuple[float, list[float]]] = {}
+_EMBED_TTL = settings.EMBED_CACHE_TTL_S
+_EMBED_MAX = settings.EMBED_CACHE_MAX
 
 _client: AsyncOpenAI | None = None
+
+
+def _ekey(model: str, text: str) -> str:
+    h = hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
+    return f"{model}:{h}"
+
+
+def _embed_cache_get(model: str, text: str):
+    key = _ekey(model, text)
+    item = _EMBED_CACHE.get(key)
+    if not item: return None
+    ts, vec = item
+    if time.time() - ts > _EMBED_TTL:
+        _EMBED_CACHE.pop(key, None)
+        return None
+    return vec
+
+
+def _embed_cache_put(model: str, text: str, vec: list[float]):
+    if len(_EMBED_CACHE) >= _EMBED_MAX:
+        _EMBED_CACHE.pop(next(iter(_EMBED_CACHE)))
+    _EMBED_CACHE[_ekey(model, text)] = (time.time(), vec)
+
+
+@profile_stage("embedding")
+async def embed_text_async(text: str) -> list[float]:
+    """Cached async embedding using persistent HTTP client."""
+    model = settings.EMBEDDING_MODEL
+    hit = _embed_cache_get(model, text)
+    if hit is not None:
+        return hit
+
+    # Use shared HTTP client for OpenAI API calls
+    import openai
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY, http_client=_HTTPX)
+    res = await client.embeddings.create(
+        model=model, input=text
+    )
+    vec = res.data[0].embedding
+    _embed_cache_put(model, text, vec)
+    return vec
+
+
+def embed_text(text: str) -> list[float]:
+    import anyio
+    return anyio.run(embed_text_async, text)
+
+
+@profile_stage("llm_response")
+async def run_llm_chat(system_prompt: str, user_message: str, history=None):
+    """
+    Uses the existing ChatCompletion logic.
+    Ensures answers are always generated, even if retrieval was weak.
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+    if history:
+        messages += history
+    messages.append({"role": "user", "content": user_message})
+
+    response = await chat_completion(messages, is_legal_query=False, max_tokens=900, temperature=0.6)
+    return response.strip()
 
 
 def _get_client() -> AsyncOpenAI:

@@ -7,18 +7,63 @@ import re
 
 from app.modules.lawfirmchatbot.services.ingestion.document_processor import process_document
 from app.modules.lawfirmchatbot.services.retrieval.vector_search import add_documents_to_vector_store, search_similar_documents, normalize_hits, build_user_prompt
-from app.modules.lawfirmchatbot.services.llm import chat_completion, looks_like_citations_only
+from app.modules.lawfirmchatbot.services.llm import chat_completion, looks_like_citations_only, run_llm_chat
 from app.modules.lawfirmchatbot.schema.query import QueryResponse, DebugInfo, DebugQueryAnalysis
 from app.modules.lawfirmchatbot.services.query_analyzer import QueryComplexityAnalyzer
 from app.modules.lawfirmchatbot.services.reranker import DocumentReranker
 from app.modules.lawfirmchatbot.services.adaptive_retrieval_service import AdaptiveRetrievalService
 from app.core.answer_policy import classify_intent, select_strategy, format_markdown, grounding_guardrails
 from core.config import settings
+from core.utils.perf import profile_stage
 from app.services.memory.db import SessionLocal
 from app.services.memory.memory_manager import ChatMemoryManager
 from app.services.memory.coref_resolver import resolve_coref
 
 logger = logging.getLogger(__name__)
+
+
+@profile_stage("rag_orchestrator")
+async def generate_answer(query: str, history=None):
+    """
+    Orchestrates retrieval + LLM answer with graceful fallback.
+    If context is partial or weak, still generate an informative answer.
+    """
+    docs, sources, pages = await search_similar_documents(query)
+    has_context = bool(docs and any(d.page_content.strip() for d in docs))
+
+    if has_context:
+        # Build combined context
+        context_text = "\n\n".join([d.page_content for d in docs[:6]])
+        system_prompt = (
+            "You are BRAG AI, a professional assistant. "
+            "Answer clearly using retrieved context below when relevant. "
+            "If context seems partial, fill in missing parts from general knowledge "
+            "but clearly indicate what is supported vs. general.\n\n"
+            f"---\n{context_text}\n---"
+        )
+    else:
+        # True no context fallback
+        system_prompt = (
+            "You are BRAG AI, a professional assistant. "
+            "No relevant context was found in the documents. "
+            "Answer the user's question using your general knowledge in a neutral, factual tone. "
+            "Avoid speculation and do not mention missing data explicitly."
+        )
+
+    response = await run_llm_chat(
+        system_prompt=system_prompt,
+        user_message=query,
+        history=history or [],
+    )
+
+    # Prepare structured references (if any)
+    references = ""
+    if has_context and sources:
+        refs = "; ".join([f"<{s}, p. {','.join(map(str, pages))}>" for s in sources])
+        references = f"\n\nReferences: {refs}"
+
+    return response + references
+
 
 # Fast-path detection for greetings and capability questions
 FASTPATH_GREET = {"hi", "hello", "hey", "hola", "yo", "hiya"}
@@ -410,8 +455,9 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
    - COMPARISON queries: lead-in → mandatory table (3+ rows) → per-approach blocks with #### Pros/#### Cons (2-4 bullets each)
    - EXPLAIN queries: 2-3 ### sections (Key Idea, How It Works, Practical Notes, Examples/Applications)
 5. Citations: [1], [2] inline when using context; single References line at end
-6. If no context: start with "I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—" and OMIT References
-7. FORBIDDEN: "Limited Information Available", "See available documents", "As an AI"
+6. If context is weak/partial: Use what's available and supplement naturally with general knowledge without explicitly mentioning limited data
+7. If truly no context: Answer naturally using general knowledge without mentioning missing documents
+8. FORBIDDEN: "Limited Information Available", "I couldn't find anything", "See available documents", "As an AI"
 {extra_instruction}"""
         return user
 
@@ -447,8 +493,9 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
    - COMPARISON: table (3+ rows) + per-approach #### Pros/#### Cons blocks
    - EXPLAIN: 2-3 ### sections (Key Idea, How It Works, Practical Notes, Examples/Applications)
 5. Citations: [p.X] inline; References: <{self.current_document['name']}, p. {page_ref_text}>
-6. If no context: "I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—" + OMIT References
-7. FORBIDDEN: "Limited Information Available", "See available documents", "As an AI" """
+6. If context is weak/partial: Use what's available and supplement naturally with general knowledge
+7. If truly no context: Answer naturally using general knowledge without mentioning missing documents
+8. FORBIDDEN: "Limited Information Available", "I couldn't find anything", "See available documents", "As an AI" """
 
     async def answer_query(self, query: str, conversation_id: Optional[str] = None, user_id: str = "anon") -> Dict[str, Any]:
         """High-level entry: route between KB-only, KB+Web, or Clarify.
@@ -599,29 +646,10 @@ Ask specific questions about your documents, request comparisons between concept
                 snippet = ctx[:200] + "..." if len(ctx) > 200 else ctx
                 logger.info(f"[RAG-DEBUG] Context {i}: {snippet}")
         
-        # Validate minimum context threshold (600 chars minimum for meaningful answers)
-        MIN_CONTEXT_CHARS = 600
-        if total_context_chars < MIN_CONTEXT_CHARS:
-            logger.warning(f"[RAG-DEBUG] Context too small: {total_context_chars} chars < {MIN_CONTEXT_CHARS} threshold")
-            if settings.DEBUG_RAG:
-                logger.info(f"[RAG-DEBUG] Available context snippets: {[ctx[:100] + '...' for ctx in numbered_context]}")
-            
-            # Return thin-context fallback instead of triggering citations-only retry
-            fallback_md = """I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—
-
-### Document Coverage
-
-The retrieved documents contain some references to your topic, but not enough detail to provide a comprehensive answer. The information may be scattered across different sections or described using alternative terminology.
-
-### Suggested Approach
-
-Try refining your query with more specific terms or asking about particular aspects of the topic. If you're looking for detailed information, consider whether additional documents need to be uploaded to the knowledge base."""
-            return {
-                "success": True,
-                "answer": fallback_md,
-                "answer_markdown": fallback_md,
-                "metadata": {"strategy": "thin_context", "kb_hits": total_hits, "web_used": use_web, "context_chars": total_context_chars, "latency_ms": int((time.time() - t_start) * 1000)}
-            }
+        # Note: Removed hard minimum context threshold - let LLM work with partial context
+        # The system will now use whatever context is available and supplement with general knowledge
+        if total_context_chars < 600:
+            logger.info(f"[answer_query] Context is small ({total_context_chars} chars) but proceeding with LLM - will use partial context + general knowledge")
 
         if use_web:
             base = len(numbered_context)
@@ -632,21 +660,14 @@ Try refining your query with more specific terms or asking about particular aspe
 
         # Only return "no info" if truly zero snippets
         if not numbered_context:
-            logger.warning(f"[answer_query] Zero snippets available, returning fallback")
-            fallback_md = """I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—
-
-### Search Results
-
-No matching content was found in the currently indexed documents for your query. This suggests the topic may not be covered in the uploaded materials, or it might be referenced using different terminology.
-
-### What You Can Do
-
-Try rephrasing your question with alternative keywords or terms. Verify that documents covering this topic have been uploaded and successfully processed. You can also try asking about related concepts that might lead to relevant information."""
+            logger.warning(f"[answer_query] Zero snippets available, using smart fallback")
+            # Use the new generate_answer function for smarter fallback
+            fallback_response = await generate_answer(resolved_query, recent_msgs)
             return {
                 "success": True,
-                "answer": fallback_md,
-                "answer_markdown": fallback_md,
-                "metadata": {"strategy": "no_snippets", "kb_hits": total_hits, "web_used": use_web, "latency_ms": int((time.time() - t_start) * 1000)}
+                "answer": fallback_response,
+                "answer_markdown": fallback_response,
+                "metadata": {"strategy": "smart_fallback", "kb_hits": total_hits, "web_used": use_web, "latency_ms": int((time.time() - t_start) * 1000)}
             }
         
         # Log context stats before LLM call
@@ -688,8 +709,9 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
    - COMPARISON/DIFFERENCE queries: lead-in (1-2 sentences) → **mandatory table** (3+ rows) → per-approach blocks with #### Pros and #### Cons (2-4 bullets each) → optional bottom line
    - EXPLAIN/DEFINE queries: 2-3 ### sections from: Key Idea, How It Works, Practical Notes, Examples/Applications
 5. Citations: [1], [2] inline ONLY when using context; end with: References: <Doc Title, p. X–Y>; <Another Doc, p. Z>
-6. If no context: start with "I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—" and OMIT References
-7. FORBIDDEN: "Limited Information Available", "See available documents", "As an AI"
+6. If context is weak/partial: Use what's available and supplement naturally with general knowledge without explicitly mentioning limited data
+7. If truly no context: Answer naturally using general knowledge without mentioning missing documents
+8. FORBIDDEN: "Limited Information Available", "I couldn't find anything", "See available documents", "As an AI"
 
 Format: compact paragraphs (3-5 sentences), active voice, concrete statements."""
 
@@ -730,22 +752,15 @@ Format: compact paragraphs (3-5 sentences), active voice, concrete statements.""
         # RAG-DEBUG: Improved guardrail logic to reduce unnecessary retries
         if looks_like_citations_only(raw_markdown):
             # Only retry if we have sufficient context (≥600 chars) AND response is truly empty
-            should_retry = total_context_chars >= MIN_CONTEXT_CHARS and len(raw_markdown.strip()) < 50
+            should_retry = total_context_chars >= 600 and len(raw_markdown.strip()) < 50
             
             if not should_retry:
                 if settings.DEBUG_RAG:
                     logger.info(f"[RAG-DEBUG] Skipping retry: insufficient context ({total_context_chars} chars) or response not empty")
-                # Use the thin-context fallback instead of retrying
-                if total_context_chars < MIN_CONTEXT_CHARS:
-                    raw_markdown = """I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—
-
-### Document Coverage
-
-The retrieved documents contain minimal references to your topic. While some relevant content was found, it's insufficient to provide a thorough answer with proper context.
-
-### Recommendation
-
-Refine your query with more specific terminology or ask about particular aspects of the topic. Additional documents may need to be uploaded if detailed information is required."""
+                # Use smart fallback instead of static message - but don't skip LLM, just pass through
+                if total_context_chars < 600:
+                    # Don't replace with static message - the LLM should use whatever context is available
+                    pass
             else:
                 logger.warning("[answer_query] Guardrail triggered: citations-only with sufficient context, retrying once")
                 t_retry_start = time.time()
@@ -786,19 +801,12 @@ Write substantive content with full explanations, not just citations."""
         # Don't strip markdown - frontend needs it for proper rendering
         final_text = final_md  # Keep markdown intact
         
-        # Ensure final answer is not empty - if still empty after retry, use thin-context fallback
+        # Ensure final answer is not empty - if still empty after retry, use smarter fallback
         if not final_text or len(final_text) < 50:
-            fallback_md = """I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—
-
-### Core Concept
-
-The topic you're asking about may not be covered in the currently uploaded documents. This could mean the information hasn't been indexed yet, or it might be described using different terminology than expected.
-
-### Next Steps
-
-Try rephrasing your question using different keywords or terms. If you know which document should contain this information, verify it has been successfully uploaded and processed. You might also want to ask about related topics that could lead to the information you need."""
-            final_text = fallback_md
-            final_md = fallback_md
+            # Use the new generate_answer function for smarter fallback
+            fallback_response = await generate_answer(resolved_query, recent_msgs)
+            final_text = fallback_response
+            final_md = fallback_response
 
         pages = []
         for ch in final_chunks:
