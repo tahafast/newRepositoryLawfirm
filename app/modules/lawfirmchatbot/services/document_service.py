@@ -112,7 +112,11 @@ async def process_document_query(
         rag_orchestrator = get_rag_orchestrator()
         # New high-level orchestrator path with strategy routing; fallback to legacy if needed
         try:
-            result = await rag_orchestrator.answer_query(request.query)
+            result = await rag_orchestrator.answer_query(
+                query=request.query,
+                conversation_id=request.conversation_id,
+                user_id=request.user_id
+            )
             from app.modules.lawfirmchatbot.schema.query import QueryResponse
             return QueryResponse(
                 success=bool(result.get("success", True)),

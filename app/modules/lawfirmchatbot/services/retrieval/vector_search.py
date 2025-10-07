@@ -163,15 +163,24 @@ def _deduplicate_chunks(chunks: list[dict]) -> tuple[list[dict], list[str], list
 
 
 def build_user_prompt(query: str, contexts: list[dict]) -> str:
-    """Build user prompt from contexts - multi-document, restart-safe; no self.current_document."""
+    """Build user prompt from contexts - BRAG AI Rich Markdown format."""
     parts = []
     for i, c in enumerate(contexts, 1):
         parts.append(f"[{i}] Source: {c['source']}\n{c['text']}")
     snippets = "\n\n---\n".join(parts)
     return (
-        "You are a legal assistant. Answer using ONLY the snippets; cite by [index].\n\n"
-        f"{snippets}\n\n"
-        f"Question: {query}\nAnswer:"
+        f"USER_QUERY: {query}\n\n"
+        f"RETRIEVED_CONTEXT:\n{snippets}\n\n"
+        "INSTRUCTIONS - Follow BRAG AI Rich Markdown format:\n"
+        "1. Length: 350–400 words\n"
+        "2. Opening: direct sentence with takeaway (no meta talk)\n"
+        "3. Headings: ## main title, ### sections (NOT 'Understanding'), #### Pros/Cons for comparisons\n"
+        "4. Structure:\n"
+        "   - COMPARISON: lead-in → mandatory table (3+ rows) → #### Pros/#### Cons per approach (2-4 bullets)\n"
+        "   - EXPLAIN: 2-3 ### sections (Key Idea, How It Works, Practical Notes, Examples/Applications)\n"
+        "5. Citations: [1], [2] inline when using context; References: <Doc Title, p. X–Y>; <Another Doc, p. Z>\n"
+        "6. If no context: 'I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—' + OMIT References\n"
+        "7. FORBIDDEN: 'Limited Information Available', 'See available documents', 'As an AI'"
     )
 
 

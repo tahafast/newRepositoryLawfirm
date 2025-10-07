@@ -11,6 +11,8 @@ class ConfidenceFactors(BaseModel):
 
 class QueryRequest(BaseModel):
     query: str
+    conversation_id: Optional[str] = None
+    user_id: str = "anon"
 
 
 class DebugQueryAnalysis(BaseModel):

@@ -73,20 +73,41 @@ def get_llm_config() -> LLMConfig:
 # ===================== Prompting =====================
 
 SYSTEM_PROMPT = (
-    "You are a legal RAG assistant. Use only the supplied KB chunks and/or web snippets.\n"
-    "- Never invent citations or facts. If a requested comparison/topic isn’t found in the supplied context, say so and (only if allowed) use web snippets you were given.\n"
-    "- Prefer precise, lawyer-friendly wording; keep it concise but substantive.\n"
-    "- Output Markdown with bold H3 section headings; tailor section names to the query intent.\n"
-    "- Use bracketed numeric citations like [1], [2] inline, and repeat them in a \"Citations\" section.\n"
-    "- If the user asks for a summary, include 3–6 bullet key points.\n"
-    "- If the user asks to compare, present a short table then bullets.\n"
-    "- If context is insufficient and web is disabled/unavailable, ask a clarifying question instead of guessing.\n"
+    "SYSTEM: BRAG AI — Final Answer Composer (Rich Markdown)\n\n"
+    "BEHAVIOR\n"
+    "- If retrieved_context contains usable facts, draw from it and add a single one-line \"References:\" at the end.\n"
+    "- If retrieved_context is empty/irrelevant, DO NOT use \"Limited information\" or apologize. Begin with:\n"
+    "  \"I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—\"\n"
+    "  Then answer normally; OMIT the References line.\n\n"
+    "HARD REQUIREMENTS\n"
+    "1) Length: 350–400 words total.\n"
+    "2) Tone: professional, confident, dynamic; first sentence is a clear takeaway.\n"
+    "3) Headings:\n"
+    "   - Use H2 for the main title (## …) tailored to the query.\n"
+    "   - Use H3 for sections (### …).\n"
+    "   - For comparisons, ALSO use H4 for per-approach Pros/Cons (#### Pros, #### Cons).\n"
+    "   - Never start a heading with \"Understanding\".\n"
+    "4) Structure by intent:\n"
+    "   A) COMPARISON / \"difference between / vs.\":\n"
+    "      - Short lead-in (1–2 sentences).\n"
+    "      - **Mandatory table** summarizing key aspects (at least 3 rows).\n"
+    "      - Per-approach blocks with H4 **Pros** and **Cons** as bullet lists (2–4 bullets each).\n"
+    "      - Optional \"Bottom Line\" paragraph.\n"
+    "   B) EXPLAIN / DEFINE / PROCEDURE:\n"
+    "      - 2–3 H3 sections chosen to fit (e.g., ### Key Idea, ### How It Works, ### Practical Notes).\n"
+    "      - Use bullets for lists and numbered lists for steps.\n"
+    "5) Citations: Only add [1], [2] when you actually used retrieved_context. End with: References: <Doc A, p. X–Y>; <Doc B, p. Z>.\n"
+    "6) Forbidden: \"Limited Information Available\", \"See available documents\", \"As an AI\".\n\n"
+    "FORMATTING RULES\n"
+    "- Tables: standard Markdown `| Aspect | Option A | Option B |` with header separator.\n"
+    "- Bullets: \"- \"; keep each bullet concise.\n"
+    "- Do not fabricate document titles, pages, or quotes. Merge contiguous pages into ranges.\n"
 )
 
 FEW_SHOTS = [
-    {"role": "assistant", "content": "### **Definition**\n<one-paragraph definition> [1]\n\n### **Key Points**\n- <point> [1]\n\n### **Citations**\n- [[1] Title — source]"},
-    {"role": "assistant", "content": "### **Quick Comparison Table**\n| Item | Feature |\n|---|---|\n| A | ... |\n| B | ... |\n\n### **Key Differences**\n- <difference> [1]\n\n### **Citations**\n- [[1] Title — source]"},
-    {"role": "assistant", "content": "### **Summary**\n- <key point> [1]\n- <key point> [2]\n\n### **Citations**\n- [[1] Title — source]"},
+    {"role": "assistant", "content": "## Contract Formation Essentials\n\nContract law governs agreements between parties and ensures enforceability through legal mechanisms.\n\n### Core Requirements\n\nA valid contract requires offer, acceptance, and consideration [1]. The parties must have legal capacity and the contract purpose must be lawful. Modern contract law balances freedom of contract with protections against unfair terms.\n\n### Practical Applications\n\nContracts apply in business transactions, employment relationships, and consumer purchases [2]. Courts interpret ambiguous terms against the drafter and may void unconscionable provisions. Electronic contracts follow similar principles with additional formality requirements.\n\nReferences: <Contract Law Fundamentals, p. 45-47>; <Modern Applications, p. 102>."},
+    {"role": "assistant", "content": "## GDPR vs. CCPA: Data Protection Frameworks\n\nBoth frameworks provide data protection, but they differ significantly in scope and enforcement mechanisms.\n\n| Aspect | GDPR | CCPA |\n|--------|------|------|\n| Jurisdiction | EU/EEA [1] | California only [2] |\n| Consent Model | Opt-in required | Opt-out permitted |\n| Penalties | Up to 4% revenue | Up to $7,500/violation |\n| Private Right | Limited | Statutory damages |\n\n### GDPR\n\n#### Pros\n- Comprehensive territorial reach across EU/EEA [1]\n- Strong consent protections with opt-in default\n- Harmonized standards reduce compliance complexity\n- Substantial penalties deter violations\n\n#### Cons\n- High compliance costs for implementation\n- Complex requirements for international transfers\n- Broad extraterritorial application creates jurisdictional issues\n\n### CCPA\n\n#### Pros\n- Flexible opt-out model reduces friction [2]\n- Private right of action for data breaches\n- Clear definitions of covered businesses\n- More lenient than GDPR for routine operations\n\n#### Cons\n- Limited to California residents only\n- Lower penalties may not deter large companies\n- Exemptions create coverage gaps\n\n### Bottom Line\n\nOrganizations operating globally must comply with both frameworks. GDPR sets a higher baseline for consent and data protection [1], while CCPA provides stronger private enforcement mechanisms [2]. Most companies adopt GDPR-compliant practices globally to simplify compliance.\n\nReferences: <Privacy Regulations Compared, p. 23-25>; <CCPA Implementation Guide, p. 67-69>."},
+    {"role": "assistant", "content": "## Trademark Protection Framework\n\nTrademark law protects brand identifiers and prevents consumer confusion in commerce.\n\n### Protection Scope\n\nTrademarks cover words, logos, and trade dress that distinguish goods or services [1]. Protection arises from use in commerce and strengthens with registration. Owners must actively police their marks to prevent genericization.\n\n### Enforcement Strategy\n\nOwners can pursue infringement actions, seek injunctions, and recover damages [2]. Likelihood of confusion determines infringement, considering mark similarity and market proximity. International protection requires registration in each jurisdiction.\n\nReferences: <Trademark Essentials, p. 89-92>."},
 ]
 
 
@@ -167,18 +188,9 @@ def build_context_from_hits(hits, max_chars=12000):
 
 
 def answer_with_context(llm_client, user_query: str, hits: list) -> str:
-    system = (
-        "You are a faithful RAG answerer. Use ONLY the provided context. "
-        "If context is insufficient: say so briefly and suggest 1 clarifying question. "
-        "Structure headings dynamically to fit the question (e.g., Definition, Steps, Pros/Cons, Example, Caveats). "
-        "Start with a short direct answer, then details. "
-        "Use inline page citations like [p.410] when you cite lines from context. "
-        "End with a compact 'References' list showing doc names and pages. "
-        "Never output only citations; always include an answer. "
-        "Output Markdown."
-    )
+    system = SYSTEM_PROMPT
     context = build_context_from_hits(hits)
-    prompt = f"User question:\n{user_query}\n\nContext (verbatim):\n{context}\n"
+    prompt = f"USER_QUERY: {user_query}\n\nRETRIEVED_CONTEXT:\n{context}\n\nFollow BRAG AI Rich Markdown format: 350-400 words, ## main title + ### sections (NOT 'Understanding'), #### Pros/Cons for comparisons, mandatory table (3+ rows) for comparison queries, direct opening sentence, inline [1] [2] citations, single References line at end. If context insufficient, start with: 'I couldn't find anything similar in the uploaded documents, but here's what I can share more generally—'"
 
     def _ask(sys_add=""):
         resp = llm_client.chat.completions.create(
@@ -192,9 +204,9 @@ def answer_with_context(llm_client, user_query: str, hits: list) -> str:
         return resp.choices[0].message.content.strip()
 
     text = _ask()
-    # Guard against "citations-only"
-    if len(text) < 120 or text.lower().startswith("citations"):
-        text = _ask("\nIMPORTANT: Provide an actual answer section (not only citations).")
+    # Guard against incomplete responses
+    if len(text) < 150 or (text.lower().startswith("references") and len(text) < 200):
+        text = _ask("\nIMPORTANT: Provide substantive content (350-400 words) with ## title, ### sections, and explanatory paragraphs. For comparisons, include mandatory table and #### Pros/Cons blocks, not just references.")
     return text
 
 
