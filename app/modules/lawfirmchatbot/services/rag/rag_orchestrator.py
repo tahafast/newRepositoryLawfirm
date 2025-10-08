@@ -18,6 +18,10 @@ from core.utils.perf import profile_stage
 from app.services.memory.db import SessionLocal
 from app.services.memory.memory_manager import ChatMemoryManager
 from app.services.memory.coref_resolver import resolve_coref
+from app.modules.lawfirmchatbot.services.docgen.manager import (
+    detect_doc_type, retrieve_template_cues, next_questions, render_html, 
+    merge_kv_answers, get_intake_schema, synthesize_sections
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +197,8 @@ class RAGOrchestrator:
         # Initialize memory manager with embedding function
         from app.modules.lawfirmchatbot.services.embeddings import embed_text
         self.memory = ChatMemoryManager(embed_text)
+        # Initialize docgen state (keyed by conversation_id)
+        self._docgen_state: Dict[str, Dict[str, Any]] = {}
 
     async def process_document(self, file_path: str, filename: str) -> int:
         """Process and index a document."""
@@ -411,7 +417,8 @@ HARD REQUIREMENTS
       - Use bullets for lists and numbered lists for steps.
 5) Citations:
    - Only add [1], [2] when you actually used retrieved_context.
-   - End with a single line: References: <Doc A, p. X–Y>; <Doc B, p. Z>.
+   - End with a single line: References: <ACTUAL_DOC_NAME.pdf, p. X–Y>; <ANOTHER_DOC.pdf, p. Z>.
+   - CRITICAL: Use the EXACT document filenames from the context headers, NOT generic "Document" label.
    - If no context used, no [n] and no References line.
 6) Forbidden anywhere: "Limited Information Available", "See available documents", "As an AI".
 
@@ -533,6 +540,75 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
         if settings.DEBUG_RAG:
             logger.info(f"[RAG-DEBUG] Starting answer_query: query='{query[:150]}...' (length={len(query)}), conversation_id={conversation_id}")
         
+        # --- Force DocGen: Intake → HTML (No How-To) ---
+        doc_type = detect_doc_type(query)
+        if doc_type:
+            logger.info(f"[DocGen] Force-mode detected: {doc_type}")
+            
+            # Per-conversation state
+            conv_id = conversation_id or "default"
+            if not hasattr(self, "_docgen_state"):
+                self._docgen_state = {}
+            state = self._docgen_state.get(conv_id, {"answers": {}, "doc_type": doc_type})
+            state["doc_type"] = doc_type
+            
+            # Merge any key:value payload from this user turn
+            merge_kv_answers(state["answers"], query, doc_type)
+            
+            # Ask only the missing required fields
+            pending = next_questions(doc_type, state["answers"])
+            if pending:
+                self._docgen_state[conv_id] = state
+                ask = "\n".join([f"- {q}" for q in pending])
+                doc_name = doc_type.replace('_', ' ').title()
+                md = f"**To draft your {doc_name}, please provide:**\n{ask}\n\n_Reply with 'key: value' (you can paste multiple lines)._"
+                
+                async with SessionLocal() as db:
+                    await self.memory.append(db, user_id, conversation_id, "assistant", md)
+                    await db.commit()
+                
+                return {
+                    "success": True,
+                    "answer": md,
+                    "answer_markdown": md,
+                    "metadata": {
+                        "mode": "docgen_intake",
+                        "doc_type": doc_type,
+                        "strategy": "docgen",
+                        "kb_hits": 0,
+                        "web_used": False,
+                        "latency_ms": int((time.time() - t_start) * 1000)
+                    }
+                }
+            
+            # Have enough → generate long-form HTML
+            logger.info(f"[DocGen] Rendering {doc_type} with {len(state['answers'])} fields")
+            cue, sources, pages = await retrieve_template_cues(doc_type, query)
+            sections = await synthesize_sections(doc_type, state["answers"], cue_text=cue)
+            refs = "; ".join([f"{s}, p. {', '.join(map(str, pages))}" for s in (sources[:3] if sources else [])]) if pages else ""
+            html = render_html(doc_type, state["answers"], sections, refs if cue else None)
+            self._docgen_state.pop(conv_id, None)
+            
+            async with SessionLocal() as db:
+                await self.memory.append(db, user_id, conversation_id, "assistant", html)
+                await db.commit()
+            
+            return {
+                "success": True,
+                "answer": html,
+                "answer_markdown": html,
+                "metadata": {
+                    "mode": "docgen_render",
+                    "doc_type": doc_type,
+                    "sources": sources,
+                    "referenced_pages": pages,
+                    "strategy": "docgen",
+                    "kb_hits": len(sources) if sources else 0,
+                    "web_used": False,
+                    "latency_ms": int((time.time() - t_start) * 1000)
+                }
+            }
+        
         # Chit-chat short-circuit: handle greetings/meta queries instantly (use resolved query)
         if is_smalltalk_or_capability(resolved_query):
             if settings.DEBUG_RAG:
@@ -610,9 +686,13 @@ Ask specific questions about your documents, request comparisons between concept
         MAX_CHUNK_CHARS = 600  # RAG-DEBUG: Optimized for speed and focus
         
         for i, ch in enumerate(final_chunks, start=1):
-            src = ch.metadata.get("source") or ch.metadata.get("document") or "Source"
+            src = ch.metadata.get("source") or ch.metadata.get("document") or "Document"
             _page = ch.metadata.get("page") or ch.metadata.get("page_number") or ch.metadata.get("page_index")
-            header = f"[{i}] {src}" + (f", page {int(_page)}" if isinstance(_page, (int, float)) else "")
+            # Format header with clear document name
+            if isinstance(_page, (int, float)):
+                header = f"[{i}] Document: {src}, Page: {int(_page)}"
+            else:
+                header = f"[{i}] Document: {src}"
             
             # Trim chunk with smart truncation (preserve section headers where possible)
             content = (ch.page_content or "").strip()
@@ -708,7 +788,9 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
 4. Structure by intent:
    - COMPARISON/DIFFERENCE queries: lead-in (1-2 sentences) → **mandatory table** (3+ rows) → per-approach blocks with #### Pros and #### Cons (2-4 bullets each) → optional bottom line
    - EXPLAIN/DEFINE queries: 2-3 ### sections from: Key Idea, How It Works, Practical Notes, Examples/Applications
-5. Citations: [1], [2] inline ONLY when using context; end with: References: <Doc Title, p. X–Y>; <Another Doc, p. Z>
+5. Citations: [1], [2] inline ONLY when using context; end with: References: <ACTUAL_DOC_NAME, p. X–Y>; <ANOTHER_DOC_NAME, p. Z>
+   - IMPORTANT: Use the EXACT document names shown in the context headers above (e.g., "Document: filename.pdf")
+   - DO NOT use generic names like "Document" - use the actual filenames provided
 6. If context is weak/partial: Use what's available and supplement naturally with general knowledge without explicitly mentioning limited data
 7. If truly no context: Answer naturally using general knowledge without mentioning missing documents
 8. FORBIDDEN: "Limited Information Available", "I couldn't find anything", "See available documents", "As an AI"

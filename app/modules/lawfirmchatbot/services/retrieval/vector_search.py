@@ -293,8 +293,11 @@ async def search_similar_documents(query: str, k: int | None = None, score_thres
     seen = set(); docs=[]; sources=set(); pages=set()
     for p in res:
         pl = p.payload or {}
-        doc = pl.get("document") or pl.get("source") or "Document"
-        page = pl.get("page")
+        # Extract metadata - check both direct payload and nested metadata
+        metadata = pl.get("metadata", {})
+        doc = (metadata.get("source") or metadata.get("document") or 
+               pl.get("source") or pl.get("document") or "Document")
+        page = metadata.get("page") or pl.get("page")
         key = (doc, page)
         if key in seen: continue
         seen.add(key)
@@ -303,6 +306,7 @@ async def search_similar_documents(query: str, k: int | None = None, score_thres
         o = Obj()
         o.page_content = pl.get("text", "")
         o.metadata = {
+            "source": doc,  # Use 'source' as primary key
             "document": doc,
             "page": page,
             "similarity_score": float(p.score)

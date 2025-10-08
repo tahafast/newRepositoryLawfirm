@@ -433,10 +433,11 @@
       data.forEach(c => {
         const item = document.createElement('div');
         item.className = 'conv' + (c.id === conversationId ? ' active' : '');
+        item.dataset.convId = c.id; // Add data attribute for easier selection
         
         const title = document.createElement('div');
         title.className = 'conv-title';
-        title.textContent = c.title || 'Untitled';
+        title.textContent = c.title || 'New Chat'; // Changed from 'Untitled' to 'New Chat'
         item.appendChild(title);
 
         const date = document.createElement('div');
@@ -584,6 +585,35 @@
     contentDiv.innerHTML = marked.parse(fullText);
   }
 
+  // Helper function to generate title from first user message
+  function generateTitleFromMessage(text) {
+    // Take first 5-7 words, capitalize first letter of each word
+    const words = text.trim().split(/\s+/).slice(0, 6);
+    let title = words.map(word => {
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    }).join(' ');
+    
+    // Truncate if longer than 40 characters
+    if (title.length > 40) {
+      title = title.substring(0, 37) + '...';
+    }
+    
+    return title;
+  }
+
+  // Update chat title in sidebar (only if it's "New Chat")
+  function updateChatTitleInSidebar(convId, newTitle) {
+    const chatItems = convList.querySelectorAll('.conv');
+    chatItems.forEach(item => {
+      const titleEl = item.querySelector('.conv-title');
+      if (titleEl && item.dataset.convId === convId) {
+        if (titleEl.textContent.trim() === 'New Chat') {
+          titleEl.textContent = newTitle;
+        }
+      }
+    });
+  }
+
   async function send() {
     const text = input.value.trim();
     if (!text) return;
@@ -593,6 +623,10 @@
     sendBtn.disabled = true;
 
     if (!conversationId) await newConversation();
+
+    // Auto-update chat title on first message
+    const newTitle = generateTitleFromMessage(text);
+    updateChatTitleInSidebar(conversationId, newTitle);
 
     // Create assistant bubble with loading
     const assistantDiv = document.createElement('div');
@@ -667,11 +701,23 @@
 
   // Initialize
   (async function init() {
-    if (!conversationId) await newConversation();
-    await listConversations();
-    await loadMessages();
-    input.focus();
-})();
+    try {
+      console.log('[INIT] Starting initialization...');
+      if (!conversationId) {
+        console.log('[INIT] No conversation ID, creating new...');
+        await newConversation();
+      }
+      console.log('[INIT] Loading conversations...');
+      await listConversations();
+      console.log('[INIT] Loading messages...');
+      await loadMessages();
+      console.log('[INIT] Initialization complete');
+      input.focus();
+    } catch (e) {
+      console.error('[INIT] Initialization failed:', e);
+      alert('Failed to initialize chat. Please refresh the page.');
+    }
+  })();
 
   // Auto-resize textarea
   input.addEventListener('input', function() {
