@@ -91,7 +91,9 @@ def is_smalltalk_or_capability(q: str) -> bool:
         "how can you help",
         "what is your purpose",
         "what services do you provide",
-        "what functions do you have"
+        "what functions do you have",
+        "tell me about yourself",
+        "introduce yourself"
     ]
     
     # Simple greeting patterns (start of query)
@@ -587,6 +589,17 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
             sections = await synthesize_sections(doc_type, state["answers"], cue_text=cue)
             refs = "; ".join([f"{s}, p. {', '.join(map(str, pages))}" for s in (sources[:3] if sources else [])]) if pages else ""
             html = render_html(doc_type, state["answers"], sections, refs if cue else None)
+            
+            # Post-check: if output smells like tutorial, retry once
+            def _looks_like_tutorial(txt: str) -> bool:
+                t = (txt or "").lower()
+                return any(b in t for b in ["how to","key components","drafting an","structure of the","prompt engineering"])
+            
+            if _looks_like_tutorial(html):
+                logger.warning(f"[DocGen] Tutorial detected in output, retrying with stricter synthesis")
+                sections = await synthesize_sections(doc_type, state["answers"], cue_text=cue)
+                html = render_html(doc_type, state["answers"], sections, refs if cue else None)
+            
             self._docgen_state.pop(conv_id, None)
             
             async with SessionLocal() as db:

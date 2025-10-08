@@ -437,7 +437,8 @@
         
         const title = document.createElement('div');
         title.className = 'conv-title';
-        title.textContent = c.title || 'New Chat'; // Changed from 'Untitled' to 'New Chat'
+        // Use persisted title from localStorage if available
+        title.textContent = getChatTitle(c.id);
         item.appendChild(title);
 
         const date = document.createElement('div');
@@ -585,33 +586,43 @@
     contentDiv.innerHTML = marked.parse(fullText);
   }
 
-  // Helper function to generate title from first user message
-  function generateTitleFromMessage(text) {
-    // Take first 5-7 words, capitalize first letter of each word
-    const words = text.trim().split(/\s+/).slice(0, 6);
-    let title = words.map(word => {
-      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-    }).join(' ');
-    
-    // Truncate if longer than 40 characters
-    if (title.length > 40) {
-      title = title.substring(0, 37) + '...';
-    }
-    
-    return title;
+  // --- Sidebar title helpers with localStorage persistence ---
+  function normalizeTitleFromText(text) {
+    if (!text) return "New Chat";
+    const words = text.trim().replace(/\s+/g, ' ').split(' ').slice(0, 7).join(' ');
+    const capped = words.charAt(0).toUpperCase() + words.slice(1);
+    return capped.length > 40 ? capped.slice(0, 37) + '…' : capped;
   }
-
-  // Update chat title in sidebar (only if it's "New Chat")
-  function updateChatTitleInSidebar(convId, newTitle) {
-    const chatItems = convList.querySelectorAll('.conv');
-    chatItems.forEach(item => {
-      const titleEl = item.querySelector('.conv-title');
-      if (titleEl && item.dataset.convId === convId) {
-        if (titleEl.textContent.trim() === 'New Chat') {
-          titleEl.textContent = newTitle;
-        }
+  
+  function saveChatTitle(conversationId, title) {
+    const map = JSON.parse(localStorage.getItem('chatTitles') || '{}');
+    map[conversationId] = title;
+    localStorage.setItem('chatTitles', JSON.stringify(map));
+  }
+  
+  function getChatTitle(conversationId) {
+    const map = JSON.parse(localStorage.getItem('chatTitles') || '{}');
+    return map[conversationId] || "New Chat";
+  }
+  
+  function updateSidebarTitle(conversationId, newTitle) {
+    const item = document.querySelector(`[data-conv-id="${conversationId}"] .conv-title`);
+    if (item) {
+      if (item.textContent.trim() === "New Chat") {
+        item.textContent = newTitle;
       }
-    });
+    }
+    saveChatTitle(conversationId, newTitle);
+  }
+  
+  // Helper function to generate title from first user message (legacy support)
+  function generateTitleFromMessage(text) {
+    return normalizeTitleFromText(text);
+  }
+  
+  // Update chat title in sidebar (only if it's "New Chat") - legacy support
+  function updateChatTitleInSidebar(convId, newTitle) {
+    updateSidebarTitle(convId, newTitle);
   }
 
   async function send() {
@@ -624,9 +635,9 @@
 
     if (!conversationId) await newConversation();
 
-    // Auto-update chat title on first message
-    const newTitle = generateTitleFromMessage(text);
-    updateChatTitleInSidebar(conversationId, newTitle);
+    // Auto-update chat title on first message (before API call for instant feedback)
+    const newTitle = normalizeTitleFromText(text);
+    updateSidebarTitle(conversationId, newTitle);
 
     // Create assistant bubble with loading
     const assistantDiv = document.createElement('div');

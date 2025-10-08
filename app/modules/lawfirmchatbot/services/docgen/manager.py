@@ -1,49 +1,45 @@
 # app/modules/lawfirmchatbot/services/docgen/manager.py
 
-import re, json
+import re, json, html
 from typing import List, Dict, Optional, Tuple
 from app.modules.lawfirmchatbot.services.retrieval.vector_search import search_similar_documents
 from app.modules.lawfirmchatbot.services.llm import chat_completion
 
-# -------------------- Force DocGen Detection --------------------
+# -------------------- Intents & detection (typo tolerant) --------------------
+DOCGEN_VERBS = r"(generate|draft|make|prepare|compose|create)"
 
-# Verbs that force drafting mode
-DOCGEN_VERBS = r"(generate|draft|make|prepare|create|format|compose)"
-
-# Map doc tokens to canonical doc types (extendable)
+# typo-/variant-tolerant tokens (synopsis/affidavit common typos)
+TOKEN = lambda *xs: [x.lower() for x in xs]
 DOC_TOKEN_MAP = {
-    "counter_affidavit": ["counter-affidavit", "counter affidavit"],
-    "affidavit_generic": ["affidavit", "sworn statement"],
-    "affidavit_support": ["affidavit in support", "supporting affidavit"],
-    "affidavit_rejoinder": ["affidavit in rejoinder", "rejoinder affidavit"],
-    "stay_application": ["stay application", "interim application", "o xxxix", "o. xxxix", "order xxxix"],
-    "written_statement": ["written statement", "ws"],
-    "plaint": ["plaint", "civil plaint", "suit plaint"],
-    "writ_petition": ["writ petition", "constitutional petition", "wp.", "w.p."],
-    "rejoinder": ["rejoinder"],
-    "synopsis": ["synopsis", "concise statement"],
-    "legal_notice": ["legal notice", "notice to"],
-    "application_misc": ["application", "misc application", "miscellaneous application"],
+    "synopsis": TOKEN("synopsis","synop","synopsys","synopisis","sypnosis","synopses"),
+    "affidavit_generic": TOKEN("affidavit","affidavit generic","sworn statement","affidavit of"),
+    "counter_affidavit": TOKEN("counter affidavit","counter-affidavit"),
+    "affidavit_support": TOKEN("affidavit in support","supporting affidavit"),
+    "affidavit_rejoinder": TOKEN("affidavit in rejoinder","rejoinder affidavit"),
+    "stay_application": TOKEN("stay application","interim application","order xxxix","o xxxix","o. xxxix"),
+    "written_statement": TOKEN("written statement","ws"),
+    "plaint": TOKEN("plaint","civil plaint","suit plaint"),
+    "writ_petition": TOKEN("writ petition","constitutional petition","w.p.","wp."),
+    "rejoinder": TOKEN("rejoinder"),
+    "legal_notice": TOKEN("legal notice","notice to"),
+    "application_misc": TOKEN("application","misc application","miscellaneous application"),
 }
 
+def _contains_any(q: str, words: List[str]) -> bool:
+    ql = q.lower()
+    return any(w in ql for w in words)
+
 def detect_doc_type(user_query: str) -> Optional[str]:
-    """
-    Return a canonical doc type if the user BOTH (a) uses a docgen verb and (b) mentions a known doc token.
-    This prevents accidental triggers in normal Q&A.
-    """
+    """Enter DocGen only when a verb+doc token appears (typo tolerant)."""
     q = (user_query or "").lower().strip()
     if not re.search(DOCGEN_VERBS, q):
         return None
-    
     for dtype, tokens in DOC_TOKEN_MAP.items():
-        for t in tokens:
-            if t in q:
-                return dtype
-    
-    # if user said 'draft an affidavit' with no sub-type, default to generic affidavit
+        if _contains_any(q, tokens):
+            return dtype
+    # common fallback: user typed "draft affidavit"
     if "affidavit" in q:
         return "affidavit_generic"
-    
     return None
 
 # -------------------- Intake Schemas --------------------
@@ -120,6 +116,49 @@ INTAKE_BY_TYPE: Dict[str, List[Dict]] = {
 def get_intake_schema(doc_type: str) -> List[Dict]:
     return INTAKE_BY_TYPE.get(doc_type, BASE_COMMON)
 
+# -------------------- Cleaners to prevent grey/inline code highlighting -----
+def _sanitize_html(s: str) -> str:
+    if not s: return ""
+    # strip backticks and <code> wrappers the model might emit
+    s = s.replace("```", "").replace("`", "")
+    s = re.sub(r"</?code>", "", s, flags=re.I)
+    return s
+
+def _ensure_json_or_retry(messages, keys: List[str], max_tokens=1900, temperature=0.35) -> Dict[str,str]:
+    """Ask once; if not valid JSON or contains tutorial patterns, retry with stricter instruction."""
+    def _ask(extra_sys=""):
+        resp = chat_completion(
+            messages=[{"role":"system","content":messages[0]["content"] + extra_sys},
+                      {"role":"user","content":messages[1]["content"]}],
+            is_legal_query=True, max_tokens=max_tokens, temperature=temperature
+        )
+        return resp
+
+    raw = _ask()
+    def _looks_tutorial(txt: str) -> bool:
+        t = (txt or "").lower()
+        bad = ["how to","key components","drafting an affidavit","structure of the",
+               "practical notes","example affidavit structure","prompt engineering"]
+        return any(b in t for b in bad)
+    try:
+        data = json.loads(raw)
+        if any(k not in data for k in keys) or _looks_tutorial(raw):
+            raise ValueError("not-json-or-tutorial")
+        return {k: _sanitize_html(data.get(k,"")) for k in keys}
+    except Exception:
+        stricter = (
+            "\nIMPORTANT: Output STRICT JSON ONLY with the specified keys. "
+            "Do not include headings like 'Key Components', 'How to', 'Structure', or any tutorial text. "
+            "Return document body only."
+        )
+        raw2 = _ask(stricter)
+        try:
+            data2 = json.loads(raw2)
+            return {k: _sanitize_html(data2.get(k,"")) for k in keys}
+        except Exception:
+            # last-resort empty shape
+            return {k: "" for k in keys}
+
 def next_questions(doc_type: str, answers: Dict[str, str]) -> List[str]:
     schema = get_intake_schema(doc_type)
     ask = [f["q"] for f in schema if f["required"] and not answers.get(f["key"])]
@@ -158,8 +197,28 @@ async def synthesize_sections(doc_type: str, a: Dict[str,str], cue_text: str) ->
     Produce long-form sections for the requested doc type.
     STRICT RULE: Output JSON ONLY; no how-to text; no meta headings.
     """
-    style = "affidavit" if "affidavit" in doc_type else "pleading"
-    target_words = max(900, min(1600, 300 + len(cue_text)//2))
+    # Determine blueprint parameters
+    bp = {
+        "affidavit_generic": dict(style="affidavit",min_words=900,max_words=1600, min_paras=10),
+        "counter_affidavit": dict(style="affidavit",min_words=1000,max_words=1800, min_paras=10),
+        "affidavit_support": dict(style="affidavit",min_words=900,max_words=1500),
+        "synopsis": dict(style="synopsis",min_words=600,max_words=1000),
+        "affidavit_rejoinder": dict(style="affidavit",min_words=900,max_words=1500),
+        "stay_application": dict(style="pleading",min_words=900,max_words=1600),
+        "written_statement": dict(style="pleading",min_words=1000,max_words=1800),
+        "plaint": dict(style="pleading",min_words=1000,max_words=1800),
+        "writ_petition": dict(style="pleading",min_words=1000,max_words=1800),
+        "rejoinder": dict(style="pleading",min_words=900,max_words=1500),
+        "legal_notice": dict(style="pleading",min_words=600,max_words=1200),
+        "application_misc": dict(style="pleading",min_words=900,max_words=1500),
+    }.get(doc_type, dict(style="pleading", min_words=900,max_words=1500))
+    
+    target_words = max(bp["min_words"], min(bp["max_words"], 300 + len(cue_text)//2))
+    style_line = {
+        "affidavit":"Formal affidavit style; no meta/tutorial headings.",
+        "pleading":"Formal pleading style with numbered paras where natural; no meta/tutorial headings.",
+        "synopsis":"Concise court synopsis style; crisp headings only as per sections; no tutorials."
+    }[bp["style"]]
 
     json_keys = {
         "affidavit_generic": ["deponent_intro","facts_html","numbered_html","prayer_html","verification_html","exhibits_html"],
@@ -177,70 +236,36 @@ async def synthesize_sections(doc_type: str, a: Dict[str,str], cue_text: str) ->
     }.get(doc_type, ["deponent_intro","facts_html","verification_html"])
 
     system = (
-        "You draft Pakistan court documents in formal, professional style. "
-        "When asked to generate, NEVER explain how to draft. "
-        "Return ONLY the document content, in JSON as instructed. "
-        "No 'Key Points', 'Conclusion', or tutorial language."
+        "You draft Pakistan court documents. When asked to generate, NEVER explain how to draft. "
+        f"Use {style_line} Output STRICT JSON only with the requested keys. "
+        "Avoid words/sections like 'Key Components', 'How to', 'Drafting', 'Structure of the'. "
+        "No backticks or <code> tags."
     )
-
+    
     user = f"""
-Exemplar cues (do NOT copy facts; use headings/phrases style only):
+Exemplar cues (phrasing/heading style only; do not copy names/facts):
 ---
 {cue_text[:3000]}
 ---
 
 Doc type: {doc_type}
-Style: {style}
-Target length: ~{target_words} words
-User fields (use verbatim where relevant):
-Court: {a.get('court')}
-Case/No: {a.get('case_type_no')}
-Title: {a.get('title')}
-Party: {a.get('party_role')}
-Deponent: {a.get('deponent')} s/o {a.get('father','')}
-CNIC: {a.get('cnic','')}
-Address: {a.get('address')}
-Authority: {a.get('authorization')}
-City/Date: {a.get('place_date')}
+Target length: ~{target_words} words; minimum numbered paras: {bp.get('min_paras', 0)}
+Fields:
+Court: {a.get('court')} | Case/No: {a.get('case_type_no')} | Title: {a.get('title')} | Party: {a.get('party_role')}
+Deponent: {a.get('deponent')} s/o {a.get('father','')} | CNIC: {a.get('cnic','')} | Address: {a.get('address')}
+Authority: {a.get('authorization')} | Place/Date: {a.get('place_date')}
 Facts: {a.get('facts','')}
-Prelim: {a.get('prelim','')}
-Para-wise: {a.get('para_wise','')}
-Grounds: {a.get('grounds','')}
-Prayer: {a.get('prayer','')}
-Exhibits: {a.get('exhibits','')}
-Counter-points: {a.get('counter_points','')}
-Issues: {a.get('issues','')}
-Reliefs: {a.get('reliefs','')}
-Under-law: {a.get('under_law','')}
-Cause-of-action: {a.get('cause_of_action','')}
-Valuation: {a.get('valuation','')}
-Recipient: {a.get('recipient','')}
-Demands: {a.get('demands','')}
-Deadline: {a.get('deadline','')}
+Prelim: {a.get('prelim','')} | Para-wise: {a.get('para_wise','')} | Grounds: {a.get('grounds','')}
+Issues: {a.get('issues','')} | Reliefs: {a.get('reliefs','')} | Prayer: {a.get('prayer','')} | Exhibits: {a.get('exhibits','')}
 
-Output STRICT JSON with keys: {", ".join(json_keys)}
+JSON keys to return: {", ".join(json_keys)}
 Semantics:
-- 'deponent_intro': one paragraph identifying authority/capacity.
-- 'facts_html': 3–6 paragraphs of factual averments based on 'Facts'.
-- If 'prelim_html' exists: 4–8 numbered objections (<ol><li>…</li></ol>).
-- If 'parawise_html' or 'numbered_html' exists: at least 8–12 numbered short paras.
-- 'prayer_html': 1–3 lines.
-- 'verification_html': verification paragraph.
-- 'exhibits_html' (optional): list <ul><li>…</li></ul>.
+- If a '*_html' key exists, produce valid HTML (<p>, <ol>, <ul>) with no inline styles.
+- For numbered/para-wise keys, produce at least {bp.get('min_paras', 8)} concise numbered paras (<p>Para 1. ...</p>).
 """
-
-    resp = await chat_completion(
-        messages=[{"role":"system","content":system},{"role":"user","content":user}],
-        is_legal_query=True, max_tokens=1900, temperature=0.35
-    )
-    try:
-        data = json.loads(resp)
-        for k in json_keys:
-            data.setdefault(k, "")
-        return data
-    except Exception:
-        # robust minimal fallback
-        return {k: "" for k in json_keys}
+    msgs = [{"role":"system","content":system},{"role":"user","content":user}]
+    data = _ensure_json_or_retry(msgs, json_keys)
+    return data
 
 # -------------------- HTML rendering (caption + dynamic body) --------------------
 
@@ -256,6 +281,10 @@ def _caption(a: Dict[str,str]) -> Dict[str,str]:
     }
 
 def render_html(doc_type: str, a: Dict[str,str], s: Dict[str,str], references: Optional[str]) -> str:
+    # Sanitize all section content before rendering
+    for k in list(s.keys()):
+        s[k] = _sanitize_html(s.get(k,""))
+    
     cap = _caption(a)
     
     heading_map = {
