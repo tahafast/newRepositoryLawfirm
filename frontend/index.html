@@ -1,41 +1,43 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Law Firm RAG — Frontend</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>BRAG AI — Legal RAG</title>
+  <link rel="stylesheet" href="./styles.css"/>
+  <script src="./theme.js"></script>
 </head>
 <body>
-  <nav class="nav">
-    <div class="brand"><img src="./logo.svg" alt="BRAG AI"/><strong>BRAG AI (LEGAL)</strong></div>
-    <span class="spacer"></span>
-    <a href="./ingest.html">Ingest</a>
-    <a href="./chat.html">Chat</a>
-    <button id="themeToggle" aria-label="Toggle color theme"><span class="icon" aria-hidden="true">🌙</span><span class="label">Dark</span></button>
-  </nav>
-  <div class="wrap">
-    <div class="card">
-      <h2>Welcome</h2>
-      <p class="muted">Use this minimal UI to upload documents and chat with your RAG backend.</p>
-      <div style="margin-top:14px">
-        <a class="btn" href="./ingest.html">Go to Ingestion</a>
-        <a class="btn" href="./chat.html" style="margin-left:10px">Go to Chat</a>
-      </div>
+  <header class="header">
+    <a class="brand" href="./index.html" id="brand-link">
+      <div class="logo">B</div>
+      <strong>BRAG AI (LEGAL)</strong>
+    </a>
+    <div class="toolbar">
+      <a class="nav-link" href="./ingest.html">Ingest</a>
+      <a class="nav-link" href="./chat.html">Chat</a>
+      <button class="btn-ghost" data-theme-toggle onclick="__bragaiTheme.toggleTheme()">🌙 Dark</button>
     </div>
-    <footer>Static two-page UI. No frameworks. You can serve this with any static server.</footer>
-  </div>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <div class="kicker">Your personal legal assistant</div>
+      <h1>BRAG AI — Draft, Search & Explain your legal docs with confidence</h1>
+      <p>Upload pleadings, affidavits, notices and textbooks. Ask questions in plain English, compare provisions, or generate court-ready drafts with citations — all grounded in your own documents.</p>
+      <div class="cta">
+        <a class="btn" href="./ingest.html">Go to Ingestion</a>
+        <a class="btn-secondary" href="./chat.html">Go to Chat</a>
+      </div>
+      <p class="small" style="margin-top:10px;">Static UI, no framework. Works with your existing FastAPI endpoints.</p>
+    </section>
+  </main>
+
   <script>
-(function(){
-  const STORAGE_KEY = "BRAG_THEME";
-  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  function paintToggle(mode){ const b=document.getElementById('themeToggle'); if(!b) return; const i=b.querySelector('.icon'); const l=b.querySelector('.label'); if(mode==='dark'){ if(i)i.textContent='☀️'; if(l)l.textContent='Light'; b.setAttribute('aria-pressed','true'); } else { if(i)i.textContent='🌙'; if(l)l.textContent='Dark'; b.setAttribute('aria-pressed','false'); } }
-  function applyTheme(m){ if(m==='dark') document.documentElement.setAttribute('data-theme','dark'); else document.documentElement.removeAttribute('data-theme'); localStorage.setItem(STORAGE_KEY,m); paintToggle(m); }
-  function currentTheme(){ const s=localStorage.getItem(STORAGE_KEY); if(s==='light'||s==='dark') return s; return prefersDark ? 'dark':'light'; }
-  const init=currentTheme(); applyTheme(init);
-  document.addEventListener('click',e=>{ if(e.target.closest && e.target.closest('#themeToggle')){ applyTheme(currentTheme()==='dark'?'light':'dark'); } });
-  if(window.matchMedia){ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ev=>{ const s=localStorage.getItem(STORAGE_KEY); if(s!=='light'&&s!=='dark') applyTheme(ev.matches?'dark':'light'); }); }
-})();
+    // Ensure brand always routes home (in case of base href changes)
+    document.getElementById('brand-link').addEventListener('click', (e) => {
+      e.preventDefault(); window.location.href = './index.html';
+    });
   </script>
 </body>
 </html>

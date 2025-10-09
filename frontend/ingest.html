@@ -1,67 +1,116 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Ingest Documents</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Upload documents — BRAG AI</title>
+  <link rel="stylesheet" href="./styles.css"/>
+  <script src="./theme.js"></script>
+  <script src="./config.js" type="module"></script>
 </head>
 <body>
-  <!-- Note: If you get CORS errors, enable CORS in your FastAPI backend with allow_origins=["*"] for local testing -->
-  <nav class="nav">
-    <div class="brand"><img src="./logo.svg" alt="BRAG AI"/><strong>Law Firm RAG</strong></div>
-    <span class="spacer"></span>
-    <a href="./index.html">Home</a>
-    <a href="./chat.html">Chat</a>
-    <button id="themeToggle" aria-label="Toggle color theme"><span class="icon" aria-hidden="true">🌙</span><span class="label">Dark</span></button>
-  </nav>
-  <div class="wrap">
-    <div class="card">
-      <h2>Upload documents</h2>
-      <p class="muted">Select one or more files (PDF, DOCX, TXT, etc.) to ingest into the knowledge base.</p>
-      <input id="fileInput" type="file" multiple />
-      <div class="row" style="margin-top:10px">
-        <button class="btn" id="btnUpload">Upload</button>
-        <span id="ingestSpinner" style="display:none"><span class="spinner"></span></span>
-        <span class="muted" id="status"></span>
-      </div>
-      <div style="margin-top:16px" class="list" id="result"></div>
+  <header class="header">
+    <a class="brand" href="./index.html" id="brand-link"><div class="logo">B</div><strong>BRAG AI</strong></a>
+    <div class="toolbar">
+      <a class="nav-link" href="./chat.html">Chat</a>
+      <button class="btn-ghost" data-theme-toggle onclick="__bragaiTheme.toggleTheme()">🌙 Dark</button>
     </div>
-  </div>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <div class="kicker">Ingestion</div>
+      <h2 style="margin:6px 0 12px;">Upload documents</h2>
+      <p class="small">PDF, DOCX, TXT. Files will be chunked, embedded and indexed in Qdrant.</p>
+
+      <form id="uploadForm">
+        <input id="files" type="file" multiple style="margin:14px 0 10px;"/>
+        <div class="cta">
+          <button class="btn" type="submit">Upload</button>
+          <a class="btn-secondary" href="./chat.html">Go to Chat</a>
+        </div>
+
+        <div class="progress-wrap" id="progressWrap" style="display:none;">
+          <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+          <p class="small" id="progressText" style="margin-top:8px;">Preparing…</p>
+        </div>
+
+        <div id="statusBox" class="status" style="display:none;"></div>
+      </form>
+    </section>
+  </main>
+
   <script type="module">
-    import { UPLOAD_ENDPOINT, postFormData } from "./config.js";
-    const statusEl = document.getElementById("status");
-    const resultEl = document.getElementById("result");
-    const spinner = document.getElementById("ingestSpinner");
-    const toggle = (on)=>{ spinner.style.display = on ? "inline-block" : "none"; btn.disabled = on; };
-    const btn = document.getElementById("btnUpload");
-    btn.onclick = async () => {
-      const files = document.getElementById("fileInput").files;
-      if (!files || files.length === 0) { alert("Pick at least one file"); return; }
-      statusEl.textContent = "Preparing upload..."; toggle(true); resultEl.innerHTML = "";
-      const tryBatch = async () => { const fd = new FormData(); [...files].forEach(f => fd.append("files", f)); return postFormData(UPLOAD_ENDPOINT, fd); };
-      const trySequential = async () => { let out=[]; for (const f of files){ const fd=new FormData(); fd.append("file", f); out.push(await postFormData(UPLOAD_ENDPOINT, fd)); } return { results: out }; };
-      try {
-        statusEl.textContent = "Uploading... this may take a minute for large PDFs.";
-        let data; try { data = await tryBatch(); } catch { data = await trySequential(); }
-        statusEl.textContent = "Ingestion complete.";
-        const pretty = document.createElement("pre"); pretty.textContent = JSON.stringify(data, null, 2); resultEl.appendChild(pretty);
-      } catch (e) {
-        statusEl.textContent = "Error."; const err = document.createElement("pre"); err.textContent = String(e?.message || e); err.className="bubble"; resultEl.appendChild(err);
-      } finally { toggle(false); }
-    };
-  </script>
-  <script>
-(function(){
-  const STORAGE_KEY = "BRAG_THEME";
-  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  function paintToggle(mode){ const b=document.getElementById('themeToggle'); if(!b) return; const i=b.querySelector('.icon'); const l=b.querySelector('.label'); if(mode==='dark'){ if(i)i.textContent='☀️'; if(l)l.textContent='Light'; b.setAttribute('aria-pressed','true'); } else { if(i)i.textContent='🌙'; if(l)l.textContent='Dark'; b.setAttribute('aria-pressed','false'); } }
-  function applyTheme(m){ if(m==='dark') document.documentElement.setAttribute('data-theme','dark'); else document.documentElement.removeAttribute('data-theme'); localStorage.setItem(STORAGE_KEY,m); paintToggle(m); }
-  function currentTheme(){ const s=localStorage.getItem(STORAGE_KEY); if(s==='light'||s==='dark') return s; return prefersDark ? 'dark':'light'; }
-  const init=currentTheme(); applyTheme(init);
-  document.addEventListener('click',e=>{ if(e.target.closest && e.target.closest('#themeToggle')){ applyTheme(currentTheme()==='dark'?'light':'dark'); } });
-  if(window.matchMedia){ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ev=>{ const s=localStorage.getItem(STORAGE_KEY); if(s!=='light'&&s!=='dark') applyTheme(ev.matches?'dark':'light'); }); }
-})();
+    import { API_BASE } from "./config.js";
+    
+    document.getElementById('brand-link').addEventListener('click', (e) => {
+      e.preventDefault(); window.location.href = './index.html';
+    });
+
+    const form = document.getElementById('uploadForm');
+    const filesInput = document.getElementById('files');
+    const progressWrap = document.getElementById('progressWrap');
+    const progressFill = document.getElementById('progressFill');
+    const progressText = document.getElementById('progressText');
+    const statusBox = document.getElementById('statusBox');
+
+    function setProgress(pct, text){
+      progressWrap.style.display = 'block';
+      progressFill.style.width = pct + '%';
+      progressText.textContent = text || (pct + '%');
+    }
+
+    function setStatus(ok, msg){
+      statusBox.style.display = 'block';
+      statusBox.className = 'status ' + (ok ? 'success' : 'error');
+      statusBox.textContent = msg;
+    }
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      statusBox.style.display = 'none';
+      const files = filesInput.files;
+      if(!files || !files.length){ setStatus(false, 'Please choose at least one file.'); return; }
+
+      const data = new FormData();
+      for (const f of files) data.append('files', f);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', API_BASE + '/api/v1/lawfirm/upload-document');
+
+      xhr.upload.addEventListener('progress', (ev) => {
+        if (ev.lengthComputable) {
+          const pct = Math.round((ev.loaded / ev.total) * 100);
+          setProgress(pct, 'Uploading… ' + pct + '%');
+        } else {
+          setProgress(15, 'Uploading…');
+        }
+      });
+
+      xhr.onreadystatechange = () => {
+        if (xhr.readyState === 4) {
+          // ingestion done (server will process chunks after upload)
+          setProgress(100, 'Processing & indexing…');
+          try {
+            const res = JSON.parse(xhr.responseText || '{}');
+            if (xhr.status >= 200 && xhr.status < 300) {
+              setStatus(true, `✅ Uploaded ${Array.isArray(res.files)? res.files.length : ''} file(s) successfully. You can start chatting now.`);
+            } else {
+              setStatus(false, `❌ Upload failed: ${res.detail || res.message || 'Unknown error'}`);
+            }
+          } catch (e) {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              setStatus(true, '✅ Upload complete. You can start chatting now.');
+            } else {
+              setStatus(false, '❌ Upload failed.');
+            }
+          }
+        }
+      };
+
+      xhr.send(data);
+      setProgress(5, 'Starting upload…');
+    });
   </script>
 </body>
 </html>
