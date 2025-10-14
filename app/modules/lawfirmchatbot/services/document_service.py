@@ -16,7 +16,7 @@ from core.config import Services
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.txt'}
+ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.doc', '.txt'}
 
 
 async def process_document_upload(

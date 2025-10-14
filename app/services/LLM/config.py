@@ -17,6 +17,12 @@ class LLMConfig:
         self.provider: str = settings.LLM_PROVIDER
         self.model: str = settings.LLM_MODEL
         
+        # Routed Models for QA vs DocGen
+        self.qa_model_name: str = getattr(settings, "QA_MODEL", self.model or "gpt-4o-mini")
+        self.docgen_model_name: str = getattr(settings, "DOCGEN_MODEL", "gpt-5")
+        self.qa_max_tokens: int = int(getattr(settings, "QA_MAX_TOKENS", 850))
+        self.docgen_max_tokens: int = int(getattr(settings, "DOCGEN_MAX_TOKENS", 3000))
+        
         # OpenAI Configuration
         self.openai_api_key: Optional[str] = settings.OPENAI_API_KEY
         
@@ -57,6 +63,35 @@ class LLMConfig:
         if self.provider == "azure_openai":
             return bool(api_key and self.azure_endpoint and self.azure_deployment)
         return bool(api_key)
+    
+    def qa_model(self) -> str:
+        """Get the model to use for Q&A tasks (fast, cheap for RAG QA)."""
+        return self.qa_model_name
+    
+    def docgen_model(self) -> str:
+        """Get the model to use for document generation tasks (thinking model for long-form drafting)."""
+        return self.docgen_model_name
+    
+    def qa_tokens(self) -> int:
+        """Get max tokens for QA mode."""
+        return self.qa_max_tokens
+    
+    def docgen_tokens(self) -> int:
+        """Get max tokens for DocGen mode (keep high so reasoning doesn't eat output)."""
+        return self.docgen_max_tokens
+    
+    def get_tokens_for_mode(self, mode: str) -> int:
+        """Get the max tokens for the given mode (qa or docgen)."""
+        return self.docgen_tokens() if mode == "docgen" else self.qa_tokens()
+    
+    # Legacy compatibility - keep existing method names working
+    def get_qa_model(self) -> str:
+        """Legacy alias for qa_model()."""
+        return self.qa_model()
+    
+    def get_docgen_model(self) -> str:
+        """Legacy alias for docgen_model()."""
+        return self.docgen_model()
 
 
 def get_llm_settings() -> LLMConfig:

@@ -1,4 +1,4 @@
-"""Robust document processing service for PDF, DOCX, and TXT files."""
+"""Robust document processing service for PDF, DOCX, DOC, and TXT files."""
 
 from typing import List, Optional
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -101,6 +101,8 @@ def _extract_text_safe(file_path: str) -> str:
             return _extract_from_pdf_safe(file_path)
         elif file_ext == '.docx':
             return _extract_from_docx_safe(file_path)
+        elif file_ext == '.doc':
+            return _extract_from_doc_safe(file_path)
         elif file_ext == '.txt':
             return _extract_from_txt_safe(file_path)
         else:
@@ -157,6 +159,38 @@ def _extract_from_docx_safe(file_path: str) -> str:
         raise
 
 
+def _extract_from_doc_safe(file_path: str) -> str:
+    """Extract text from legacy DOC files using best-effort strategies."""
+    try:
+        with open(file_path, 'rb') as file:
+            raw_bytes = file.read()
+    except Exception as e:
+        logger.error(f"DOC extraction failed: {e}")
+        raise
+
+    stripped = raw_bytes.lstrip()
+
+    # DOC files saved as RTF are common; detect and convert
+    if stripped.startswith(b'{\\rtf'):
+        rtf_text = _rtf_bytes_to_text(raw_bytes)
+        if rtf_text and rtf_text.strip():
+            return rtf_text
+        logger.warning("RTF conversion for DOC file returned empty text; falling back to binary decode")
+
+    # Fallback: decode binary content and strip control characters
+    for encoding in ('cp1252', 'utf-8', 'latin-1'):
+        try:
+            decoded = raw_bytes.decode(encoding)
+            cleaned = _clean_doc_binary_text(decoded)
+            if cleaned.strip():
+                return cleaned
+        except UnicodeDecodeError:
+            continue
+
+    # If nothing produced usable text, raise error
+    raise ValueError("Could not extract text content from DOC file")
+
+
 def _extract_from_txt_safe(file_path: str) -> str:
     """Extract text from TXT with encoding detection."""
     encodings = ['utf-8', 'utf-16', 'cp1252', 'iso-8859-1']
@@ -187,6 +221,8 @@ def _get_page_count_safe(file_path: str) -> int:
             return _get_pdf_page_count_safe(file_path)
         elif file_ext == '.docx':
             return _get_docx_page_count_safe(file_path)
+        elif file_ext == '.doc':
+            return _get_doc_page_count_safe(file_path)
         elif file_ext == '.txt':
             return _get_txt_page_count_safe(file_path)
         else:
@@ -241,3 +277,48 @@ def _assign_page_numbers(chunks: List[Document], text: str, total_pages: int) ->
         char_position = chunk.metadata.get('start_index', 0)
         page_num = min(total_pages, max(1, math.ceil((char_position + 1) / chars_per_page)))
         chunk.metadata["page"] = page_num
+
+
+def _rtf_bytes_to_text(raw_bytes: bytes) -> str:
+    """Convert RTF bytes to plain text."""
+    for encoding in ("utf-8", "utf-16", "utf-16le", "utf-16be", "cp1252", "latin-1"):
+        try:
+            candidate = raw_bytes.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        candidate = raw_bytes.decode("utf-8", errors="ignore")
+
+    try:
+        from striprtf.striprtf import rtf_to_text
+        return rtf_to_text(candidate)
+    except Exception as e:
+        logger.warning(f"striprtf conversion failed ({e}); using regex fallback for RTF text extraction")
+        text = re.sub(r'\\par[d]?', '\n', candidate)
+        text = re.sub(r'\\[A-Za-z]+\d*(?:\s|)', ' ', text)
+        text = text.replace('{', ' ').replace('}', ' ')
+        return text
+
+
+def _clean_doc_binary_text(text: str) -> str:
+    """Remove binary control characters and normalize whitespace from DOC content."""
+    if not text:
+        return text
+
+    text = text.replace('\x00', '')
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = ''.join(ch if ch.isprintable() or ch in '\n\t' else ' ' for ch in text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    return text.strip()
+
+
+def _get_doc_page_count_safe(file_path: str) -> int:
+    """Estimate DOC page count using file size heuristic."""
+    try:
+        file_size = os.path.getsize(file_path)
+        # DOC files tend to be denser; use slightly larger divisor than TXT
+        return max(1, math.ceil(file_size / 4500))
+    except Exception:
+        return 1

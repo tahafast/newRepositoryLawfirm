@@ -5,7 +5,10 @@ import logging
 
 # Import DTOs only
 from app.modules.lawfirmchatbot.schema.query import QueryRequest, QueryResponse
-from app.modules.lawfirmchatbot.schema.documents import DocumentUploadResponse
+from app.modules.lawfirmchatbot.schema.documents import (
+    DocumentUploadResponse,
+    DocumentUploadBatchResponse,
+)
 from core.config import get_legacy_services, Services
 
 # Import service functions
@@ -29,13 +32,39 @@ v1 = APIRouter(prefix="/api/v1/lawfirm", tags=["Law Firm Chatbot"])
 # @v1.post("/query") ...
 router = v1  # optional alias for external imports
 
-@v1.post("/upload-document", response_model=DocumentUploadResponse)
+@v1.post(
+    "/upload-document",
+    response_model=DocumentUploadResponse | DocumentUploadBatchResponse,
+)
 async def upload_document(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    files: List[UploadFile] | None = File(default=None),
     services: Services = Depends(get_legacy_services)
-) -> DocumentUploadResponse:
+) -> DocumentUploadResponse | DocumentUploadBatchResponse:
     """Upload and process a document for RAG indexing."""
-    return await process_document_upload(file, services)
+    uploads: List[UploadFile] = []
+    if file is not None:
+        uploads.append(file)
+    if files:
+        uploads.extend(files)
+
+    if not uploads:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    results: List[DocumentUploadResponse] = []
+    for item in uploads:
+        result = await process_document_upload(item, services)
+        results.append(result)
+
+    if len(results) == 1:
+        return results[0]
+
+    total_chunks = sum(r.chunks for r in results)
+    return DocumentUploadBatchResponse(
+        message=f"Successfully processed {len(results)} files",
+        total_chunks=total_chunks,
+        files=results,
+    )
 
 @v1.post("/query", response_model=QueryResponse)
 async def query_document(

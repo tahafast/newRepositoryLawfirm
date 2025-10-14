@@ -23,6 +23,13 @@ class DocumentUploadResponse(BaseModel):
     filename: str
 
 
+class DocumentUploadBatchResponse(BaseModel):
+    """Response model when multiple documents are uploaded in one request."""
+    message: str
+    total_chunks: int
+    files: list[DocumentUploadResponse]
+
+
 class DocumentChunk(BaseModel):
     content: str
     metadata: Dict[str, Any]
