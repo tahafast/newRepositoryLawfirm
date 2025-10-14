@@ -335,6 +335,66 @@
     .streaming-cursor {
       background: var(--brand);
     }
+
+    /* Styling for rendered HTML documents (doc-gen) */
+    .html-document {
+      background: white !important;
+      color: #000 !important;
+      padding: 40px !important;
+      font-family: 'Times New Roman', Times, serif !important;
+      line-height: 1.6 !important;
+      max-width: 100% !important;
+      border: 1px solid #ddd !important;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
+    }
+
+    /* Dark mode: keep document white (like a paper) */
+    :root[data-theme="dark"] .html-document {
+      background: white !important;
+      color: #000 !important;
+      border: 1px solid #555 !important;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
+    }
+
+    .html-document p {
+      margin: 12px 0 !important;
+      text-align: justify !important;
+      color: #000 !important;
+    }
+
+    .html-document ol {
+      margin: 16px 0 !important;
+      padding-left: 24px !important;
+    }
+
+    .html-document ol li {
+      margin: 8px 0 !important;
+      text-align: justify !important;
+      color: #000 !important;
+    }
+
+    .html-document h1, .html-document h2, .html-document h3 {
+      text-align: center !important;
+      margin: 16px 0 !important;
+      font-weight: bold !important;
+      text-transform: uppercase !important;
+      color: #000 !important;
+    }
+
+    .html-document table {
+      margin: 16px auto !important;
+      border-collapse: collapse !important;
+    }
+
+    .html-document table td {
+      padding: 8px !important;
+      color: #000 !important;
+    }
+
+    /* Ensure all nested elements in html-document stay black on white */
+    .html-document * {
+      color: #000 !important;
+    }
   </style>
 </head>
 <body>
@@ -373,7 +433,7 @@
   </div>
 
   <script type="module">
-  import { API_BASE } from "./config.runtime.js?v=2025-09-16-1";
+  import { API_BASE } from "./config.runtime.js?v=2025-10-13-dark-fix";
 
   const API = API_BASE + '/api/v1/lawfirm';
   let conversationId = localStorage.getItem('conversation_id') || null;
@@ -383,6 +443,30 @@
   const transcript = document.getElementById('transcript');
   const input = document.getElementById('input');
   const sendBtn = document.getElementById('send');
+
+  // Helper to detect if text is HTML (starts with <html>, <div>, <!DOCTYPE, etc.)
+  function isHtmlContent(text) {
+    const trimmed = (text || '').trim();
+    
+    // Debug: log first 200 chars to see what we're getting
+    console.log('[HTML-DETECT] First 200 chars:', trimmed.substring(0, 200));
+    console.log('[HTML-DETECT] Starts with <:', trimmed.startsWith('<'));
+    console.log('[HTML-DETECT] Contains </:', trimmed.includes('</'));
+    console.log('[HTML-DETECT] Length:', trimmed.length);
+    
+    // Check for common HTML patterns that indicate document generation
+    const isHtml = trimmed.startsWith('<!DOCTYPE') || 
+           trimmed.startsWith('<html') || 
+           trimmed.startsWith('<div>') ||
+           trimmed.startsWith('<div ') ||
+           trimmed.match(/^<p>/) ||
+           trimmed.match(/^<ol>/) ||
+           // More aggressive: if it starts with < and has HTML tags, treat as HTML
+           (trimmed.startsWith('<') && (trimmed.includes('</p>') || trimmed.includes('</div>') || trimmed.includes('</ol>')) && trimmed.length > 100);
+    
+    console.log('[HTML-DETECT] Result:', isHtml);
+    return isHtml;
+  }
 
   function bubble(role, text, isMarkdown = false, referencedPages = null, documentName = null) {
     const div = document.createElement('div');
@@ -395,7 +479,19 @@
     if (role === 'assistant' && isMarkdown) {
       const answerBox = document.createElement('div');
       answerBox.className = 'assistant-card answer-content';
-      answerBox.innerHTML = marked.parse(text);
+      
+      // Check if content is HTML (doc-gen output) or Markdown (QA output)
+      if (isHtmlContent(text)) {
+        // Render HTML directly for document generation
+        answerBox.className = 'assistant-card answer-content html-document';
+        answerBox.innerHTML = text;
+        console.log('[HTML-DOC] Rendering as HTML document');
+      } else {
+        // Parse as markdown for QA responses
+        answerBox.innerHTML = marked.parse(text);
+        console.log('[MARKDOWN] Rendering as markdown');
+      }
+      
       div.appendChild(answerBox);
 
       // Add metadata
@@ -409,7 +505,7 @@
         if (documentName) {
           rows.push(`Document: ${documentName}`);
         }
-        metaDiv.textContent = rows.join(' • ');
+        metaDiv.textContent = rows.join(' | ');
             div.appendChild(metaDiv);
           }
         } else {
@@ -572,6 +668,16 @@
     const contentDiv = bubbleDiv.querySelector('.answer-content') || bubbleDiv.querySelector('div:last-child');
     if (!contentDiv) return;
 
+    // Check if content is HTML - if so, render immediately without streaming
+    if (isHtmlContent(fullText)) {
+      contentDiv.className = 'assistant-card answer-content html-document';
+      contentDiv.innerHTML = fullText;
+      transcript.scrollTop = transcript.scrollHeight;
+      console.log('[HTML-DOC] Rendered HTML document in streaming');
+      return;
+    }
+
+    // Stream markdown content word by word
     const words = fullText.split(' ');
     let displayedText = '';
     
@@ -697,8 +803,10 @@
       // Add metadata after streaming
       const pages = data?.metadata?.referenced_pages;
       const doc = data?.metadata?.document;
+      const docType = data?.metadata?.doc_type;
+      const references = Array.isArray(data?.metadata?.references) ? data.metadata.references.filter(Boolean) : [];
       
-      if (pages || doc) {
+      if ((pages && pages.length) || doc || (docType && docType !== 'general') || references.length) {
         const metaDiv = document.createElement('div');
         metaDiv.className = 'meta-row';
         const rows = [];
@@ -708,7 +816,13 @@
         if (doc) {
           rows.push(`Document: ${doc}`);
         }
-        metaDiv.textContent = rows.join(' • ');
+        if (docType && docType !== 'general') {
+          rows.push(`Document type: ${docType.replace(/_/g, ' ')}`);
+        }
+        if (references.length > 0) {
+          rows.push(`Referenced from: ${references.join(', ')}`);
+        }
+        metaDiv.textContent = rows.join(' | ');
         assistantDiv.appendChild(metaDiv);
       }
       

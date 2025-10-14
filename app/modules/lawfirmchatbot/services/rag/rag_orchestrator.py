@@ -9,7 +9,7 @@ from app.modules.lawfirmchatbot.services.ingestion.document_processor import pro
 from app.modules.lawfirmchatbot.services.retrieval.vector_search import add_documents_to_vector_store, search_similar_documents, normalize_hits, build_user_prompt
 from app.modules.lawfirmchatbot.services.llm import chat_completion, looks_like_citations_only, run_llm_chat
 from app.modules.lawfirmchatbot.schema.query import QueryResponse, DebugInfo, DebugQueryAnalysis
-from app.modules.lawfirmchatbot.services.query_analyzer import QueryComplexityAnalyzer
+from app.modules.lawfirmchatbot.services.query_analyzer import QueryComplexityAnalyzer, is_docgen_request
 from app.modules.lawfirmchatbot.services.reranker import DocumentReranker
 from app.modules.lawfirmchatbot.services.adaptive_retrieval_service import AdaptiveRetrievalService
 from app.core.answer_policy import classify_intent, select_strategy, format_markdown, grounding_guardrails
@@ -19,11 +19,61 @@ from app.services.memory.db import SessionLocal
 from app.services.memory.memory_manager import ChatMemoryManager
 from app.services.memory.coref_resolver import resolve_coref
 from app.modules.lawfirmchatbot.services.docgen.manager import (
-    detect_doc_type, retrieve_template_cues, next_questions, render_html, 
+    detect_doc_type as manager_detect_doc_type, retrieve_template_cues, next_questions, render_html, 
     merge_kv_answers, get_intake_schema, synthesize_sections
 )
+from app.modules.lawfirmchatbot.services.prompts.docgen import get_docgen_prompt, build_docgen_prompt
+from app.services.LLM.config import get_llm_settings
 
 logger = logging.getLogger(__name__)
+
+# Initialize LLM config for routing
+LLM = get_llm_settings()
+
+# === DOCGEN Intent Detection ===
+DOCGEN_KEYWORDS = [
+    "draft", "generate", "prepare", "make", "compose", "write",
+    "counter affidavit", "affidavit", "legal notice", "synopsis",
+    "rejoinder", "reply", "application", "stay", "writ", "petition",
+    "plaint", "para-wise", "prayer", "power of attorney"
+]
+
+def _looks_like_docgen(q: str) -> bool:
+    """Detect if query looks like document generation request."""
+    t = (q or "").lower()
+    return any(k in t for k in DOCGEN_KEYWORDS)
+
+
+def detect_doc_type(query: str) -> str:
+    """Lightweight intent classifier to determine requested document type."""
+    q = (query or "").lower()
+    if any(k in q for k in ["affidavit", "counter affidavit", "counter-affidavit"]):
+        return "affidavit"
+    if any(k in q for k in ["synopsis", "summary", "synopses"]):
+        return "synopsis"
+    if any(k in q for k in ["rejoinder", "reply", "response"]):
+        return "rejoinder"
+    if any(k in q for k in ["legal notice", "notice", "serve notice"]):
+        return "legal_notice"
+    return "general"
+
+
+def ensure_markdown(answer: str, refs: list[str]) -> str:
+    """
+    Ensure answer has proper markdown formatting.
+    Adds heading if missing and normalizes references.
+    """
+    text = answer.strip()
+    
+    # Add main heading if missing
+    if text and "# " not in text[:80].lower():
+        text = "# Answer\n\n" + text
+    
+    # Add references if provided and not already present
+    if refs and "**references**" not in text.lower() and "references:" not in text.lower():
+        text += "\n\n**References:** " + "; ".join(refs)
+    
+    return text
 
 
 @profile_stage("rag_orchestrator")
@@ -543,7 +593,7 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
             logger.info(f"[RAG-DEBUG] Starting answer_query: query='{query[:150]}...' (length={len(query)}), conversation_id={conversation_id}")
         
         # --- Force DocGen: Intake → HTML (No How-To) ---
-        doc_type = detect_doc_type(query)
+        doc_type = manager_detect_doc_type(query)
         if doc_type:
             logger.info(f"[DocGen] Force-mode detected: {doc_type}")
             
@@ -644,11 +694,26 @@ Ask specific questions about your documents, request comparisons between concept
                 "metadata": {"strategy": "chit_chat", "kb_hits": 0, "web_used": False, "latency_ms": int((time.time() - t_start) * 1000)}
             }
         
+        # === INTELLIGENT ROUTING: Detect mode (QA vs DocGen) ===
+        # Use new _looks_like_docgen helper to detect docgen intent
+        is_docgen = _looks_like_docgen(resolved_query)
+        mode = "docgen" if is_docgen else "qa"
+        
+        # Retrieval sizing based on mode
+        if is_docgen:
+            k = 6  # Reduced from 10 - enough for template context without timeout
+            score_thresh = 0.20
+        else:
+            k = 4  # fast QA
+            score_thresh = 0.22
+        
+        if settings.DEBUG_RAG:
+            logger.info(f"[RAG-DEBUG] Mode detected: {mode}, top_k={k}, score_threshold={score_thresh}")
+        
         # Retrieve more candidates for strategy decision (use resolved query)
-        k = 6
         t_embed_start = time.time()
         # search_similar_documents now returns a tuple: (documents, unique_sources, unique_pages)
-        search_result = await search_similar_documents(resolved_query, k=k)
+        search_result = await search_similar_documents(resolved_query, k=k, score_threshold=score_thresh)
         t_qdrant_search = time.time() - t_embed_start
         t_embed = t_qdrant_search  # Includes embedding time
         
@@ -692,11 +757,48 @@ Ask specific questions about your documents, request comparisons between concept
         numbered_context: List[str] = []
         source_list: List[Tuple[str, str]] = []  # (key, title)
 
-        # RAG-DEBUG: Enhanced context trimming for optimal token management
-        final_chunks = initial_chunks[:6]
+        # === MODE-AWARE CONTEXT BUILDING ===
+        # Adjust context limits based on mode
+        if mode == "docgen":
+            MAX_TOTAL_CONTEXT_CHARS = 4000  # Reduced to prevent timeouts (was 8000)
+            MAX_CHUNK_CHARS = 700  # Shorter chunks for faster processing
+            # Stitch contiguous pages from same document for better template context
+            stitched = []
+            by_key = {}
+            for ch in initial_chunks[:k * 2]:  # Allow more candidates for stitching
+                src = ch.metadata.get("source") or ch.metadata.get("document") or "Source"
+                page = ch.metadata.get("page") or ch.metadata.get("page_number")
+                key = f"{src}"
+                page_num = int(page) if isinstance(page, (int, float)) else -1
+                by_key.setdefault(key, []).append((page_num, ch))
+            
+            # Sort and stitch contiguous pages
+            for key, arr in by_key.items():
+                arr.sort(key=lambda x: x[0])
+                block = []
+                prev = None
+                for p, ch in arr:
+                    if prev is None or (p != -1 and p == prev + 1):
+                        block.append(ch)
+                    else:
+                        if block:
+                            stitched.append(block)
+                        block = [ch]
+                    prev = p
+                if block:
+                    stitched.append(block)
+            
+            # Flatten: prefer biggest stitched blocks first for docgen
+            stitched.sort(key=lambda blk: sum(len((c.page_content or "")) for c in blk), reverse=True)
+            final_chunks = []
+            for blk in stitched:
+                final_chunks.extend(blk)
+        else:
+            MAX_TOTAL_CONTEXT_CHARS = 2800  # Keep context short for QA
+            MAX_CHUNK_CHARS = 500  # Trim chunks for speed
+            final_chunks = initial_chunks[:6]
+        
         total_context_chars = 0
-        MAX_TOTAL_CONTEXT_CHARS = 4000  # RAG-DEBUG: Keep total context under ~1000 tokens
-        MAX_CHUNK_CHARS = 600  # RAG-DEBUG: Optimized for speed and focus
         
         for i, ch in enumerate(final_chunks, start=1):
             src = ch.metadata.get("source") or ch.metadata.get("document") or "Document"
@@ -784,117 +886,167 @@ Ask specific questions about your documents, request comparisons between concept
                 header = f"[MR{j}] Prior Chat"
                 numbered_context.append(f"{header}\n{r['text']}")
         
-        user_prompt = f"""Write a final answer using the retrieved context below.
+        # === MODE-AWARE PROMPTING AND MODEL SELECTION ===
+        import os
+        model_general = os.getenv("GENERAL_MODEL", "gpt-4o-mini")
+        model_doc = os.getenv("DOCGEN_MODEL", "gpt-4o")
+        detected_doc_type: Optional[str] = None
+        references_list: List[str] = []
+        raw_markdown = ""
+        final_md = ""
+        t_llm_first = 0.0
+        extra_llm_params: Dict[str, Any] = {}
+        intent_label = "general"
+        temperature = 0.2
+        use_stream = True
 
-RETRIEVED_CONTEXT:
+        from app.modules.lawfirmchatbot.services.llm import _get_client
+        openai_client = _get_client()
+
+        if mode == "docgen":
+            detected_doc_type = detect_doc_type(resolved_query)
+            system_prompt = get_docgen_prompt(detected_doc_type)
+            docgen_answers = {"user_request": resolved_query}
+            if recall_snippets:
+                docgen_answers["prior_chat"] = " | ".join(r["text"] for r in recall_snippets[:2])
+            if source_list:
+                ordered_titles = list(dict.fromkeys(title for _, title in source_list))
+                if ordered_titles:
+                    docgen_answers["retrieved_sources"] = "; ".join(ordered_titles[:4])
+            references_list = []
+            seen_refs = set()
+            for ch in final_chunks[:3]:
+                src = ch.metadata.get("source") or ch.metadata.get("document") or ch.metadata.get("title")
+                page = ch.metadata.get("page") or ch.metadata.get("page_number")
+                if not src:
+                    continue
+                label = f"{src}, p. {int(page)}" if isinstance(page, (int, float)) else str(src)
+                if label in seen_refs:
+                    continue
+                seen_refs.add(label)
+                references_list.append(label)
+            user_prompt = build_docgen_prompt(resolved_query, docgen_answers, final_chunks)
+            history_messages = [
+                msg for msg in (recent_msgs or [])
+                if msg.get("role") in ("user", "assistant")
+            ][-4:]
+            messages = [
+                {"role": "system", "content": system_prompt}
+            ] + history_messages + [
+                {"role": "user", "content": user_prompt},
+            ]
+            messages = fit_context(messages, max_tokens_for_context=120000)
+            intent_label = "docgen"
+            use_stream = False
+            target_model = model_doc
+            if settings.DEBUG_RAG:
+                total_prompt_chars = sum(len(m.get("content", "")) for m in messages)
+                logger.info(f"[RAG-DEBUG] DocGen type={detected_doc_type}, model={target_model}")
+                logger.info(f"[RAG-DEBUG] DocGen prompt messages={len(messages)}, total_chars={total_prompt_chars}, est_tokens={total_prompt_chars//4}")
+                logger.info(f"[RAG-DEBUG] DocGen system preview: {messages[0]['content'][:200]}...")
+                logger.info(f"[RAG-DEBUG] DocGen user preview: {messages[-1]['content'][:500]}...")
+        else:
+            system_prompt = """You are a precise legal RAG answerer. Use only provided context; format with dynamic headings and tables; no fluff."""
+            target_model = model_general
+            user_prompt = f"""Using the CONTEXT, answer the QUESTION concisely but with structure.
+
+CONTEXT:
 {chr(10).join(numbered_context)}
 
-USER_QUERY: {query}
+QUESTION: {query}
 
-INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
-1. Length: 350–400 words
-2. Opening: one direct sentence with the takeaway (no meta talk)
-3. Headings:
-   - ## Main title tailored to the query
-   - ### for sections (NOT starting with "Understanding")
-   - #### Pros and #### Cons for comparison queries
-4. Structure by intent:
-   - COMPARISON/DIFFERENCE queries: lead-in (1-2 sentences) → **mandatory table** (3+ rows) → per-approach blocks with #### Pros and #### Cons (2-4 bullets each) → optional bottom line
-   - EXPLAIN/DEFINE queries: 2-3 ### sections from: Key Idea, How It Works, Practical Notes, Examples/Applications
-5. Citations: [1], [2] inline ONLY when using context; end with: References: <ACTUAL_DOC_NAME, p. X–Y>; <ANOTHER_DOC_NAME, p. Z>
-   - IMPORTANT: Use the EXACT document names shown in the context headers above (e.g., "Document: filename.pdf")
-   - DO NOT use generic names like "Document" - use the actual filenames provided
-6. If context is weak/partial: Use what's available and supplement naturally with general knowledge without explicitly mentioning limited data
-7. If truly no context: Answer naturally using general knowledge without mentioning missing documents
-8. FORBIDDEN: "Limited Information Available", "I couldn't find anything", "See available documents", "As an AI"
+OUTPUT RULES:
+- Start with a direct one-sentence answer.
+- Then use dynamic H2/H3 headings that fit the topic (e.g., Key Points, How It Works, Pros/Cons, Risks, Examples).
+- For comparisons/differences: include a **markdown table** first, then bullets.
+- Keep 8-14 sentences total for complex topics.
+- Use inline bracketed refs [1], [2] and end with **References:** doc/page list.
+- No boilerplate like "Limited information available."
+"""
+            extra_llm_params = {"max_tokens": 850}
+            async with SessionLocal() as db:
+                qa_recent_msgs = await self.memory.get_prompt_messages(db, conversation_id, recent_pairs=5)
+            messages = [
+                {"role": "system", "content": system_prompt}
+            ] + qa_recent_msgs + [
+                {"role": "user", "content": user_prompt},
+            ]
+            messages = fit_context(messages, max_tokens_for_context=120000)
+            if settings.DEBUG_RAG:
+                total_prompt_chars = sum(len(m.get("content", "")) for m in messages)
+                logger.info(f"[RAG-DEBUG] Mode={mode}, Model={target_model}, extra_params={extra_llm_params}")
+                logger.info(f"[RAG-DEBUG] Sending to LLM: {len(messages)} messages, total_chars={total_prompt_chars}, est_tokens={total_prompt_chars//4}")
+                logger.info(f"[RAG-DEBUG] System prompt preview: {messages[0]['content'][:200]}...")
+                logger.info(f"[RAG-DEBUG] User prompt preview: {messages[-1]['content'][:500]}...")
 
-Format: compact paragraphs (3-5 sentences), active voice, concrete statements."""
-
-        # Prepend recent conversation history
-        async with SessionLocal() as db:
-            recent_msgs = await self.memory.get_prompt_messages(db, conversation_id, recent_pairs=5)
-        
-        messages = [
-            {"role": "system", "content": self._get_system_prompt()}
-        ] + recent_msgs + [
-            {"role": "user", "content": user_prompt},
-        ]
-
-        messages = fit_context(messages)
-        
-        # RAG-DEBUG: Log full prompt being sent to LLM
-        if settings.DEBUG_RAG:
-            total_prompt_chars = sum(len(m.get('content', '')) for m in messages)
-            logger.info(f"[RAG-DEBUG] Sending to LLM: {len(messages)} messages, total_chars={total_prompt_chars}, est_tokens={total_prompt_chars//4}")
-            logger.info(f"[RAG-DEBUG] System prompt preview: {messages[0]['content'][:200]}...")
-            logger.info(f"[RAG-DEBUG] User prompt preview: {messages[1]['content'][:500]}...")
-        
         t_llm_start = time.time()
-        # Increased to 2000 tokens for detailed, comprehensive responses
-        raw_markdown = await chat_completion(messages, is_legal_query=True, max_tokens=2000, temperature=0.3)
+        raw_response = await chat_completion(
+            client=openai_client,
+            model=target_model,
+            messages=messages,
+            intent=intent_label,
+            temperature=temperature,
+            stream=use_stream,
+            extra_params=extra_llm_params,
+        )
         t_llm_first = time.time() - t_llm_start
-        
+
+        if hasattr(raw_response, "choices"):
+            raw_markdown = raw_response.choices[0].message.content or ""
+        elif hasattr(raw_response, "output_text"):
+            raw_markdown = raw_response.output_text or ""
+        elif hasattr(raw_response, "output"):
+            if isinstance(raw_response.output, list):
+                chunks = []
+                for item in raw_response.output:
+                    if hasattr(item, "type") and item.type == "output_text":
+                        chunks.append(getattr(item, "text", ""))
+                    elif hasattr(item, "content"):
+                        chunks.append(item.content)
+                raw_markdown = "\n".join(chunks).strip()
+            else:
+                raw_markdown = str(raw_response.output) if raw_response.output else ""
+        else:
+            raw_markdown = ""
+
         if settings.DEBUG_RAG:
             estimated_tokens = len(raw_markdown) // 4
-            logger.info(f"[RAG-DEBUG] LLM first call: t_llm={t_llm_first*1000:.0f}ms, response_len={len(raw_markdown)} chars, est_tokens={estimated_tokens}")
-            if len(raw_markdown) > 0:
+            logger.info(f"[RAG-DEBUG] LLM call complete: mode={mode}, t_llm={t_llm_first*1000:.0f}ms, response_len={len(raw_markdown)} chars, est_tokens={estimated_tokens}")
+            if raw_markdown:
                 logger.info(f"[RAG-DEBUG] LLM response preview: {raw_markdown[:300]}...")
             else:
-                logger.error(f"[RAG-DEBUG] LLM returned EMPTY response! This is the core issue.")
+                logger.error("[RAG-DEBUG] LLM returned EMPTY response! This is the core issue.")
         else:
             logger.info(f"[answer_query] LLM first call: t_llm={t_llm_first*1000:.0f}ms, response_len={len(raw_markdown)} chars")
 
-        # RAG-DEBUG: Improved guardrail logic to reduce unnecessary retries
-        if looks_like_citations_only(raw_markdown):
-            # Only retry if we have sufficient context (≥600 chars) AND response is truly empty
-            should_retry = total_context_chars >= 600 and len(raw_markdown.strip()) < 50
-            
-            if not should_retry:
-                if settings.DEBUG_RAG:
-                    logger.info(f"[RAG-DEBUG] Skipping retry: insufficient context ({total_context_chars} chars) or response not empty")
-                # Use smart fallback instead of static message - but don't skip LLM, just pass through
-                if total_context_chars < 600:
-                    # Don't replace with static message - the LLM should use whatever context is available
-                    pass
-            else:
-                logger.warning("[answer_query] Guardrail triggered: citations-only with sufficient context, retrying once")
-                t_retry_start = time.time()
-                
-                # More direct and stronger retry instruction
-                retry_prompt = """Your previous response was incomplete. Provide a complete answer following BRAG AI Rich Markdown requirements:
-
-REQUIRED FORMAT:
-1. Opening: one direct sentence with takeaway
-2. Headings: ## main title, ### sections (NOT "Understanding"), #### Pros/Cons for comparisons
-3. Length: 350-400 words, compact paragraphs (3-5 sentences)
-4. Structure:
-   - COMPARISON: lead-in → mandatory table (3+ rows) → #### Pros/#### Cons per approach (2-4 bullets each)
-   - EXPLAIN: 2-3 ### sections (Key Idea, How It Works, Practical Notes)
-5. Citations: [1], [2] inline; References: <Doc Title, p. X–Y>; <Another Doc, p. Z>
-6. Professional, confident tone - FORBIDDEN: "Limited Information Available"
-
-Write substantive content with full explanations, not just citations."""
-                
-                retry_messages = [
-                    {"role": "system", "content": self._get_system_prompt()},
-                    {"role": "user", "content": user_prompt},
-                    {"role": "assistant", "content": raw_markdown},
-                    {"role": "user", "content": retry_prompt},
-                ]
-                retry_messages = fit_context(retry_messages)
-                raw_markdown = await chat_completion(retry_messages, is_legal_query=True, max_tokens=2000, temperature=0.2)
-                t_guardrail_retry = time.time() - t_retry_start
-                
-                if settings.DEBUG_RAG:
-                    estimated_retry_tokens = len(raw_markdown) // 4
-                    logger.info(f"[RAG-DEBUG] Guardrail retry: t_retry={t_guardrail_retry*1000:.0f}ms, new_response_len={len(raw_markdown)} chars, est_tokens={estimated_retry_tokens}")
-                else:
-                    logger.info(f"[answer_query] Guardrail retry: t_retry={t_guardrail_retry*1000:.0f}ms, new_response_len={len(raw_markdown)} chars")
-
-        # Use raw_markdown directly - keep markdown formatting for frontend
         final_md = raw_markdown.strip()
-        # Don't strip markdown - frontend needs it for proper rendering
-        final_text = final_md  # Keep markdown intact
+
+        if mode == "docgen" and final_md:
+            if references_list:
+                references_text = ", ".join(references_list)
+                if final_md.lstrip().startswith("<"):
+                    final_md = final_md.rstrip() + f'<div class="doc-references">Referenced from: {references_text}</div>'
+                else:
+                    final_md += f"\n\nReferenced from: {references_text}"
+
+        # For QA mode: ensure markdown formatting and add references
+        if mode == "qa" and final_md:
+            # Build references list from sources
+            refs = []
+            seen_sources = set()
+            for ch in final_chunks[:6]:
+                src = ch.metadata.get("source") or ch.metadata.get("document") or "Document"
+                p = ch.metadata.get("page") or ch.metadata.get("page_number")
+                if src not in seen_sources:
+                    if p:
+                        refs.append(f"{src}, p. {p}")
+                    else:
+                        refs.append(src)
+                    seen_sources.add(src)
+            references_list = refs
+            final_md = ensure_markdown(final_md, refs)
+        
+        final_text = final_md
         
         # Ensure final answer is not empty - if still empty after retry, use smarter fallback
         if not final_text or len(final_text) < 50:
@@ -902,6 +1054,9 @@ Write substantive content with full explanations, not just citations."""
             fallback_response = await generate_answer(resolved_query, recent_msgs)
             final_text = fallback_response
             final_md = fallback_response
+            references_list = []
+            if mode == "docgen":
+                detected_doc_type = None
 
         pages = []
         for ch in final_chunks:
@@ -928,9 +1083,13 @@ Write substantive content with full explanations, not just citations."""
             "answer_markdown": final_md,
             "metadata": {
                 "strategy": strategy,
+                "mode": mode,
+                "model": target_model,
                 "kb_hits": total_hits,
                 "web_used": use_web,
                 "referenced_pages": pages if pages else None,
+                "references": references_list,
+                "doc_type": detected_doc_type,
                 "latency_ms": int(t_total * 1000),
                 "num_chunks_sent": num_chunks_sent,
                 "conversation_id": conversation_id,
