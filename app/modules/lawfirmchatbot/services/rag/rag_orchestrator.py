@@ -3,6 +3,7 @@
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 import logging
+import os
 import re
 
 from app.modules.lawfirmchatbot.services.ingestion.document_processor import process_document
@@ -18,11 +19,14 @@ from core.utils.perf import profile_stage
 from app.services.memory.db import SessionLocal
 from app.services.memory.memory_manager import ChatMemoryManager
 from app.services.memory.coref_resolver import resolve_coref
-from app.modules.lawfirmchatbot.services.docgen.manager import (
-    detect_doc_type as manager_detect_doc_type, retrieve_template_cues, next_questions, render_html, 
-    merge_kv_answers, get_intake_schema, synthesize_sections
-)
 from app.modules.lawfirmchatbot.services.prompts.docgen import get_docgen_prompt, build_docgen_prompt
+from app.modules.lawfirmchatbot.services.conversation_state import (
+    get_conversation_state,
+    update_summary,
+    update_last_document,
+    record_response,
+)
+from app.modules.lawfirmchatbot.services.document_service import render_html_document, extract_case_info
 from app.services.LLM.config import get_llm_settings
 
 logger = logging.getLogger(__name__)
@@ -32,10 +36,21 @@ LLM = get_llm_settings()
 
 # === DOCGEN Intent Detection ===
 DOCGEN_KEYWORDS = [
-    "draft", "generate", "prepare", "make", "compose", "write",
-    "counter affidavit", "affidavit", "legal notice", "synopsis",
-    "rejoinder", "reply", "application", "stay", "writ", "petition",
-    "plaint", "para-wise", "prayer", "power of attorney"
+    "generate", "draft", "prepare", "write", "compose",
+    "affidavit", "synopsis", "petition", "suit", "rejoinder",
+    "legal notice", "counter affidavit", "plaint", "reply",
+    "document", "bail", "application"
+]
+
+TWEAK_KEYWORDS = [
+    "tweak", "revise", "modify", "simplify", "edit", "tone",
+    "change", "update", "add", "remove", "replace"
+]
+
+FOLLOWUP_KEYWORDS = [
+    "continue", "carry on", "from above", "use above", "same info", "same details",
+    "as before", "as discussed", "earlier", "previous response", "next part",
+    "keep going", "follow up", "add to that"
 ]
 
 def _looks_like_docgen(q: str) -> bool:
@@ -56,6 +71,94 @@ def detect_doc_type(query: str) -> str:
     if any(k in q for k in ["legal notice", "notice", "serve notice"]):
         return "legal_notice"
     return "general"
+
+
+def _is_tweak_request(query: str) -> bool:
+    text = (query or "").lower()
+    return any(kw in text for kw in TWEAK_KEYWORDS)
+
+
+def _is_followup_request(query: str) -> bool:
+    text = (query or "").lower()
+    return any(kw in text for kw in FOLLOWUP_KEYWORDS)
+
+
+def detect_mode(user_query: str, cache=None) -> str:
+    """
+    Classify query into general QA, fresh document generation, or document tweak.
+    """
+    text = (user_query or "").lower()
+    last_doc = ""
+    if cache:
+        if isinstance(cache, dict):
+            last_doc = cache.get("last_doc") or cache.get("last_document") or ""
+        else:
+            last_doc = getattr(cache, "last_document", "") or getattr(cache, "last_doc", "")
+    has_last_doc = bool(last_doc)
+
+    if has_last_doc and (any(t in text for t in TWEAK_KEYWORDS) or any(f in text for f in FOLLOWUP_KEYWORDS)):
+        return "tweak_doc"
+
+    if any(k in text for k in DOCGEN_KEYWORDS):
+        return "docgen"
+
+    return "general"
+
+
+def should_use_retriever(mode: str, user_query: str) -> bool:
+    """
+    Decide whether to hit Qdrant based on routing mode and trigger keywords.
+    """
+    text = (user_query or "").lower()
+
+    if mode == "tweak_doc":
+        return False
+
+    if mode == "docgen":
+        return True
+
+    if mode == "general":
+        keywords = ["law", "act", "article", "section", "ordinance", "precedent"]
+        return any(k in text for k in keywords)
+
+    return False
+
+
+async def _update_summary_with_exchange(
+    conversation_id: str,
+    state,
+    user_message: str,
+    assistant_reply: str,
+) -> None:
+    """
+    Append the latest exchange to the running summary, summarizing when necessary.
+    """
+    user_text = (user_message or "").strip()
+    assistant_text = (assistant_reply or "").strip()
+
+    truncated_assistant = assistant_text
+    if len(truncated_assistant) > 1200:
+        truncated_assistant = truncated_assistant[:1200]
+
+    existing = (state.summary or "").strip()
+    addition = f"User: {user_text}\nAssistant: {truncated_assistant}"
+    combined = f"{existing}\n{addition}".strip() if existing else addition
+
+    # Summarize if the running summary becomes too long.
+    if len(combined.split()) > 360:
+        summary_prompt = (
+            "Summarize the following conversation between a legal assistant and a user. "
+            "Capture key facts, commitments, decisions, preferred tone, and outstanding requests "
+            "in bullet form (max 6 bullets):\n\n"
+            f"{combined}"
+        )
+        summary = await run_llm_chat(
+            system_prompt="You condense legal assistant conversations into concise bullet summaries.",
+            user_message=summary_prompt,
+        )
+        await update_summary(conversation_id, summary.strip())
+    else:
+        await update_summary(conversation_id, combined)
 
 
 def ensure_markdown(answer: str, refs: list[str]) -> str:
@@ -250,7 +353,6 @@ class RAGOrchestrator:
         from app.modules.lawfirmchatbot.services.embeddings import embed_text
         self.memory = ChatMemoryManager(embed_text)
         # Initialize docgen state (keyed by conversation_id)
-        self._docgen_state: Dict[str, Dict[str, Any]] = {}
 
     async def process_document(self, file_path: str, filename: str) -> int:
         """Process and index a document."""
@@ -591,87 +693,163 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
         # RAG-DEBUG: Comprehensive query logging
         if settings.DEBUG_RAG:
             logger.info(f"[RAG-DEBUG] Starting answer_query: query='{query[:150]}...' (length={len(query)}), conversation_id={conversation_id}")
+        state_cache = await get_conversation_state(conversation_id)
+        detected_mode_label = detect_mode(resolved_query, state_cache)
+
+        if detected_mode_label == "tweak_doc" and state_cache.last_document:
+            logger.info(f"[DocGen] Tweak request detected; reusing last document (doc_type={state_cache.last_doc_type})")
+            prior_doc = state_cache.last_document.strip()
+            if len(prior_doc) > 16000:
+                prior_doc = prior_doc[:16000]
+
+            conversation_summary = state_cache.summary.strip() if state_cache.summary else ""
+            doc_type_label = state_cache.last_doc_type or detect_doc_type(resolved_query) or "legal_document"
+
+            system_prompt = (
+                "You are updating an existing Pakistani legal filing. "
+                "Preserve the provided HTML structure, headings, numbering, references, and signature blocks. "
+                "Only change text necessary to satisfy the user request."
+            )
+
+            instruction_block = (
+                f"User instruction: {resolved_query}\n\n"
+                "Implement the instruction precisely while leaving unrelated portions untouched."
+            )
+
+            user_prompt_parts = []
+            if conversation_summary:
+                user_prompt_parts.append(f"Conversation summary so far:\n{conversation_summary}")
+            user_prompt_parts.append(f"Existing document HTML:\n{prior_doc}")
+            user_prompt_parts.append(instruction_block)
+            user_prompt = "\n\n".join(user_prompt_parts)
+
+            from app.modules.lawfirmchatbot.services.llm import _get_client
+            openai_client = _get_client()
+            model_doc = os.getenv("DOCGEN_MODEL", "gpt-4o")
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            response = await chat_completion(
+                client=openai_client,
+                model=model_doc,
+                messages=messages,
+                intent="docgen",
+                temperature=0.2,
+                stream=False,
+                extra_params={"max_tokens": 2000},
+            )
+
+            if hasattr(response, "choices"):
+                revised_html = response.choices[0].message.content or ""
+            elif hasattr(response, "output_text"):
+                revised_html = response.output_text or ""
+            elif hasattr(response, "output"):
+                if isinstance(response.output, list):
+                    chunks = []
+                    for item in response.output:
+                        if hasattr(item, "type") and item.type == "output_text":
+                            chunks.append(getattr(item, "text", ""))
+                        elif hasattr(item, "content"):
+                            chunks.append(item.content)
+                    revised_html = "\n".join(chunks).strip()
+                else:
+                    revised_html = str(response.output) if response.output else ""
+            else:
+                revised_html = ""
+
+            if revised_html.startswith("```"):
+                first_newline = revised_html.find("\n")
+                if first_newline > 0:
+                    revised_html = revised_html[first_newline + 1:]
+                if revised_html.endswith("```"):
+                    revised_html = revised_html[:-3].rstrip()
+
+            if not revised_html:
+                raise RuntimeError("Tweak request failed to generate output.")
+
+            normalized_html = render_html_document(revised_html)
+            references_list = list(state_cache.last_references)
+
+            await update_last_document(conversation_id, normalized_html, doc_type_label, references_list)
+            await record_response(conversation_id, normalized_html, mode="tweak")
+            await _update_summary_with_exchange(conversation_id, state_cache, resolved_query, normalized_html)
+
+            async with SessionLocal() as db:
+                await self.memory.append(db, user_id, conversation_id, "assistant", normalized_html)
+                await db.commit()
+
+            latency = int((time.time() - t_start) * 1000)
+            return {
+                "success": True,
+                "answer": normalized_html,
+                "answer_markdown": normalized_html,
+                "metadata": {
+                    "mode": "docgen_tweak",
+                    "doc_type": doc_type_label,
+                    "strategy": "docgen",
+                    "kb_hits": 0,
+                    "web_used": False,
+                    "references": references_list,
+                    "latency_ms": latency,
+                    "conversation_id": conversation_id,
+                    "response_type": "html",
+                    "model": model_doc,
+                    "has_doc": True
+                }
+            }
+
         
-        # --- Force DocGen: Intake → HTML (No How-To) ---
-        doc_type = manager_detect_doc_type(query)
-        if doc_type:
-            logger.info(f"[DocGen] Force-mode detected: {doc_type}")
-            
-            # Per-conversation state
-            conv_id = conversation_id or "default"
-            if not hasattr(self, "_docgen_state"):
-                self._docgen_state = {}
-            state = self._docgen_state.get(conv_id, {"answers": {}, "doc_type": doc_type})
-            state["doc_type"] = doc_type
-            
-            # Merge any key:value payload from this user turn
-            merge_kv_answers(state["answers"], query, doc_type)
-            
-            # Ask only the missing required fields
-            pending = next_questions(doc_type, state["answers"])
-            if pending:
-                self._docgen_state[conv_id] = state
-                ask = "\n".join([f"- {q}" for q in pending])
-                doc_name = doc_type.replace('_', ' ').title()
-                md = f"**To draft your {doc_name}, please provide:**\n{ask}\n\n_Reply with 'key: value' (you can paste multiple lines)._"
-                
+        
+        docgen_context_fields: Dict[str, str] = {}
+        if detected_mode_label == "docgen":
+            extracted_info = extract_case_info(resolved_query)
+            extracted_data = extracted_info.get("data", {}) or {}
+            docgen_context_fields = dict(getattr(state_cache, "doc_fields", {}) or {})
+
+            for key, value in extracted_data.items():
+                if key not in docgen_context_fields:
+                    docgen_context_fields[key] = value
+                elif value:
+                    docgen_context_fields[key] = value
+
+            state_cache.doc_fields = docgen_context_fields
+            filled_count = sum(1 for v in docgen_context_fields.values() if v)
+
+            if filled_count < 3:
+                missing_fields = [k for k, v in docgen_context_fields.items() if not v]
+                missing_list = ", ".join(field.replace("_", " ") for field in missing_fields) or "additional case details"
+                ask_text = f"To draft your document, please provide the following missing details: {missing_list}."
+
+                await record_response(conversation_id, ask_text, mode="docgen_missing")
+                await _update_summary_with_exchange(conversation_id, state_cache, resolved_query, ask_text)
+
                 async with SessionLocal() as db:
-                    await self.memory.append(db, user_id, conversation_id, "assistant", md)
+                    await self.memory.append(db, user_id, conversation_id, "assistant", ask_text)
                     await db.commit()
-                
+
+                model_general = os.getenv("GENERAL_MODEL", "gpt-4o-mini")
+                latency = int((time.time() - t_start) * 1000)
                 return {
                     "success": True,
-                    "answer": md,
-                    "answer_markdown": md,
+                    "answer": ask_text,
+                    "answer_markdown": ask_text,
                     "metadata": {
-                        "mode": "docgen_intake",
-                        "doc_type": doc_type,
+                        "mode": "docgen_missing",
                         "strategy": "docgen",
                         "kb_hits": 0,
                         "web_used": False,
-                        "latency_ms": int((time.time() - t_start) * 1000)
+                        "latency_ms": latency,
+                        "conversation_id": conversation_id,
+                        "response_type": "text",
+                        "model": model_general,
+                        "has_doc": False,
+                        "missing_fields": [field.replace("_", " ") for field in missing_fields],
                     }
                 }
-            
-            # Have enough → generate long-form HTML
-            logger.info(f"[DocGen] Rendering {doc_type} with {len(state['answers'])} fields")
-            cue, sources, pages = await retrieve_template_cues(doc_type, query)
-            sections = await synthesize_sections(doc_type, state["answers"], cue_text=cue)
-            refs = "; ".join([f"{s}, p. {', '.join(map(str, pages))}" for s in (sources[:3] if sources else [])]) if pages else ""
-            html = render_html(doc_type, state["answers"], sections, refs if cue else None)
-            
-            # Post-check: if output smells like tutorial, retry once
-            def _looks_like_tutorial(txt: str) -> bool:
-                t = (txt or "").lower()
-                return any(b in t for b in ["how to","key components","drafting an","structure of the","prompt engineering"])
-            
-            if _looks_like_tutorial(html):
-                logger.warning(f"[DocGen] Tutorial detected in output, retrying with stricter synthesis")
-                sections = await synthesize_sections(doc_type, state["answers"], cue_text=cue)
-                html = render_html(doc_type, state["answers"], sections, refs if cue else None)
-            
-            self._docgen_state.pop(conv_id, None)
-            
-            async with SessionLocal() as db:
-                await self.memory.append(db, user_id, conversation_id, "assistant", html)
-                await db.commit()
-            
-            return {
-                "success": True,
-                "answer": html,
-                "answer_markdown": html,
-                "metadata": {
-                    "mode": "docgen_render",
-                    "doc_type": doc_type,
-                    "sources": sources,
-                    "referenced_pages": pages,
-                    "strategy": "docgen",
-                    "kb_hits": len(sources) if sources else 0,
-                    "web_used": False,
-                    "latency_ms": int((time.time() - t_start) * 1000)
-                }
-            }
-        
+
         # Chit-chat short-circuit: handle greetings/meta queries instantly (use resolved query)
         if is_smalltalk_or_capability(resolved_query):
             if settings.DEBUG_RAG:
@@ -691,12 +869,20 @@ Ask specific questions about your documents, request comparisons between concept
                 "success": True,
                 "answer": smalltalk_answer,
                 "answer_markdown": smalltalk_answer,
-                "metadata": {"strategy": "chit_chat", "kb_hits": 0, "web_used": False, "latency_ms": int((time.time() - t_start) * 1000)}
+                "metadata": {
+                    "strategy": "chit_chat",
+                    "kb_hits": 0,
+                    "web_used": False,
+                    "latency_ms": int((time.time() - t_start) * 1000),
+                    "conversation_id": conversation_id,
+                    "response_type": "text",
+                    "model": os.getenv("GENERAL_MODEL", "gpt-4o-mini"),
+                    "has_doc": False
+                }
             }
         
         # === INTELLIGENT ROUTING: Detect mode (QA vs DocGen) ===
-        # Use new _looks_like_docgen helper to detect docgen intent
-        is_docgen = _looks_like_docgen(resolved_query)
+        is_docgen = detected_mode_label == "docgen"
         mode = "docgen" if is_docgen else "qa"
         
         # Retrieval sizing based on mode
@@ -711,26 +897,35 @@ Ask specific questions about your documents, request comparisons between concept
             logger.info(f"[RAG-DEBUG] Mode detected: {mode}, top_k={k}, score_threshold={score_thresh}")
         
         # Retrieve more candidates for strategy decision (use resolved query)
-        t_embed_start = time.time()
-        # search_similar_documents now returns a tuple: (documents, unique_sources, unique_pages)
-        search_result = await search_similar_documents(resolved_query, k=k, score_threshold=score_thresh)
-        t_qdrant_search = time.time() - t_embed_start
-        t_embed = t_qdrant_search  # Includes embedding time
-        
-        # Unpack the tuple
-        if isinstance(search_result, tuple):
-            initial_chunks, _, _ = search_result
+        use_retriever = should_use_retriever(detected_mode_label, resolved_query)
+        initial_chunks = []
+        total_hits = 0
+        strong_hits = 0
+        max_score = 0.0
+        t_qdrant_search = 0.0
+
+        if use_retriever:
+            t_embed_start = time.time()
+            # search_similar_documents now returns a tuple: (documents, unique_sources, unique_pages)
+            search_result = await search_similar_documents(resolved_query, k=k, score_threshold=score_thresh)
+            t_qdrant_search = time.time() - t_embed_start
+            t_embed = t_qdrant_search  # Includes embedding time
+
+            if isinstance(search_result, tuple):
+                initial_chunks, _, _ = search_result
+            else:
+                # Fallback for backwards compatibility
+                initial_chunks = search_result
+
+            total_hits = len(initial_chunks)
+            scores = [float(ch.metadata.get("similarity_score", 0.0)) for ch in initial_chunks]
+            strong_hits = sum(1 for s in scores if s >= 0.25)
+            max_score = max(scores) if scores else 0.0
+
+            logger.info(f"[answer_query] Retrieval: total_hits={total_hits}, strong_hits={strong_hits}, max_score={max_score:.3f}, t_qdrant={t_qdrant_search*1000:.0f}ms")
         else:
-            # Fallback for backwards compatibility
-            initial_chunks = search_result
-        
-        total_hits = len(initial_chunks)
-        scores = [float(ch.metadata.get("similarity_score", 0.0)) for ch in initial_chunks]
-        strong_hits = sum(1 for s in scores if s >= 0.25)
-        max_score = max(scores) if scores else 0.0
-
-        logger.info(f"[answer_query] Retrieval: total_hits={total_hits}, strong_hits={strong_hits}, max_score={max_score:.3f}, t_qdrant={t_qdrant_search*1000:.0f}ms")
-
+            logger.info("[answer_query] Retrieval skipped; using conversation context only")
+            t_embed = 0.0
         retrieval_stats = {"total_hits": total_hits, "strong_hits": strong_hits, "max_score": max_score}
         intent = classify_intent(resolved_query)
         strategy = select_strategy(resolved_query, retrieval_stats)
@@ -834,6 +1029,12 @@ Ask specific questions about your documents, request comparisons between concept
             key = f"{src}|{_page}" if _page is not None else src
             source_list.append((key, str(src)))
         
+        if state_cache.pinned_facts:
+            fact_lines = "\n".join([f"- {k}: {v}" for k, v in state_cache.pinned_facts.items() if v])
+            if fact_lines:
+                numbered_context.append(f"[F] Conversation Facts\n{fact_lines}")
+
+
         # RAG-DEBUG: Context validation before LLM call
         if settings.DEBUG_RAG:
             logger.info(f"[RAG-DEBUG] Context validation: num_chunks={len(numbered_context)}, total_chars={total_context_chars}")
@@ -853,19 +1054,35 @@ Ask specific questions about your documents, request comparisons between concept
                 numbered_context.append(f"{header}\n{w['snippet']}")
                 source_list.append((w["url"], w["title"]))
 
+        if not numbered_context and (state_cache.summary or state_cache.last_document):
+            if state_cache.summary:
+                numbered_context.append(f"[S] Conversation Summary\n{state_cache.summary}")
+            if state_cache.last_document:
+                doc_snippet = state_cache.last_document[:2000]
+                numbered_context.append(f"[D] Last Document Snapshot\n{doc_snippet}")
+
         # Only return "no info" if truly zero snippets
         if not numbered_context:
             logger.warning(f"[answer_query] Zero snippets available, using smart fallback")
             # Use the new generate_answer function for smarter fallback
             fallback_response = await generate_answer(resolved_query, recent_msgs)
+            await record_response(conversation_id, fallback_response, mode="qa")
+            await _update_summary_with_exchange(conversation_id, state_cache, resolved_query, fallback_response)
             return {
                 "success": True,
                 "answer": fallback_response,
                 "answer_markdown": fallback_response,
-                "metadata": {"strategy": "smart_fallback", "kb_hits": total_hits, "web_used": use_web, "latency_ms": int((time.time() - t_start) * 1000)}
+                "metadata": {
+                    "strategy": "smart_fallback",
+                    "kb_hits": total_hits,
+                    "web_used": use_web,
+                    "latency_ms": int((time.time() - t_start) * 1000),
+                    "conversation_id": conversation_id,
+                    "response_type": "text",
+                    "model": os.getenv("GENERAL_MODEL", "gpt-4o-mini"),
+                    "has_doc": False,
+                }
             }
-        
-        # Log context stats before LLM call
         num_chunks_sent = len(numbered_context)
         estimated_prompt_tokens = total_context_chars // 4  # Rough estimate
         logger.info(f"[answer_query] Context: num_chunks={num_chunks_sent}, total_chars={total_context_chars}, est_tokens={estimated_prompt_tokens}")
@@ -887,7 +1104,6 @@ Ask specific questions about your documents, request comparisons between concept
                 numbered_context.append(f"{header}\n{r['text']}")
         
         # === MODE-AWARE PROMPTING AND MODEL SELECTION ===
-        import os
         model_general = os.getenv("GENERAL_MODEL", "gpt-4o-mini")
         model_doc = os.getenv("DOCGEN_MODEL", "gpt-4o")
         detected_doc_type: Optional[str] = None
@@ -907,6 +1123,8 @@ Ask specific questions about your documents, request comparisons between concept
             detected_doc_type = detect_doc_type(resolved_query)
             system_prompt = get_docgen_prompt(detected_doc_type)
             docgen_answers = {"user_request": resolved_query}
+            if docgen_context_fields:
+                docgen_answers.update({k: v for k, v in docgen_context_fields.items() if v})
             if recall_snippets:
                 docgen_answers["prior_chat"] = " | ".join(r["text"] for r in recall_snippets[:2])
             if source_list:
@@ -946,7 +1164,11 @@ Ask specific questions about your documents, request comparisons between concept
                 logger.info(f"[RAG-DEBUG] DocGen system preview: {messages[0]['content'][:200]}...")
                 logger.info(f"[RAG-DEBUG] DocGen user preview: {messages[-1]['content'][:500]}...")
         else:
-            system_prompt = """You are a precise legal RAG answerer. Use only provided context; format with dynamic headings and tables; no fluff."""
+            system_prompt = (
+                "You are a concise legal research assistant. Use the provided context to answer factually and conversationally. "
+                "Do not draft or imitate formal legal documents, pleadings, notices, or petitions. "
+                "Keep responses in plain text or markdown suited for discussion."
+            )
             target_model = model_general
             user_prompt = f"""Using the CONTEXT, answer the QUESTION concisely but with structure.
 
@@ -962,6 +1184,7 @@ OUTPUT RULES:
 - Keep 8-14 sentences total for complex topics.
 - Use inline bracketed refs [1], [2] and end with **References:** doc/page list.
 - No boilerplate like "Limited information available."
+- Do NOT format the answer as a legal document, petition, or notice.
 """
             extra_llm_params = {"max_tokens": 850}
             async with SessionLocal() as db:
@@ -1028,6 +1251,7 @@ OUTPUT RULES:
                     final_md = final_md.rstrip() + f'<div class="doc-references">Referenced from: {references_text}</div>'
                 else:
                     final_md += f"\n\nReferenced from: {references_text}"
+            final_md = render_html_document(final_md)
 
         # For QA mode: ensure markdown formatting and add references
         if mode == "qa" and final_md:
@@ -1053,10 +1277,16 @@ OUTPUT RULES:
             # Use the new generate_answer function for smarter fallback
             fallback_response = await generate_answer(resolved_query, recent_msgs)
             final_text = fallback_response
-            final_md = fallback_response
+            if mode == "docgen":
+                final_text = render_html_document(final_text)
+            final_md = final_text
             references_list = []
             if mode == "docgen":
                 detected_doc_type = None
+
+        if mode == "docgen" and final_text:
+            await update_last_document(conversation_id, final_text, detected_doc_type, references_list)
+            state_cache.doc_fields = {}
 
         pages = []
         for ch in final_chunks:
@@ -1064,6 +1294,9 @@ OUTPUT RULES:
             if isinstance(p, (int, float)) and int(p) not in pages:
                 pages.append(int(p))
         pages = sorted(pages)
+
+        await record_response(conversation_id, final_text, mode=mode)
+        await _update_summary_with_exchange(conversation_id, state_cache, resolved_query, final_text)
 
         # Persist assistant response to memory
         async with SessionLocal() as db:
@@ -1093,6 +1326,8 @@ OUTPUT RULES:
                 "latency_ms": int(t_total * 1000),
                 "num_chunks_sent": num_chunks_sent,
                 "conversation_id": conversation_id,
+                "response_type": "html" if mode == "docgen" else "text",
+                "has_doc": mode == "docgen",
             }
         }
 

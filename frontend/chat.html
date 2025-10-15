@@ -130,6 +130,17 @@
       border-color: var(--accent);
     }
 
+    .conv.has-doc::after {
+      content: "DOC";
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      font-size: 0.65rem;
+      font-weight: 600;
+      color: var(--brand);
+      letter-spacing: 0.05em;
+    }
+
     .conv-title {
       font-weight: 500;
       color: var(--text);
@@ -444,6 +455,62 @@
   const input = document.getElementById('input');
   const sendBtn = document.getElementById('send');
 
+  const CHAT_STATE_KEY = 'chat_state_meta';
+  let chatState = {};
+  try {
+    chatState = JSON.parse(localStorage.getItem(CHAT_STATE_KEY) || '{}');
+  } catch (e) {
+    console.warn('[CHAT-STATE] Failed to parse chat state cache, resetting.', e);
+    chatState = {};
+  }
+
+  const TWEAK_TRIGGERS = [
+    'tweak','revise','modify','simplify','edit','tone','change','update','add','remove','replace'
+  ];
+
+  function getChatHasDoc(id) {
+    return !!(chatState[id] && chatState[id].hasDoc);
+  }
+
+  function setChatHasDoc(id, value) {
+    if (!id) return;
+    chatState[id] = { ...(chatState[id] || {}), hasDoc: !!value };
+    localStorage.setItem(CHAT_STATE_KEY, JSON.stringify(chatState));
+  }
+
+  function clearChatState(id) {
+    if (!id || !chatState[id]) return;
+    delete chatState[id];
+    localStorage.setItem(CHAT_STATE_KEY, JSON.stringify(chatState));
+  }
+
+  function ensureChatSubject(id, userInput) {
+    if (!id) return;
+    const currentSubject = getChatTitle(id);
+    if (currentSubject && currentSubject.trim() && currentSubject.trim().toLowerCase() !== "new chat") {
+      return;
+    }
+
+    const original = (userInput || "").trim();
+    if (!original) {
+      return;
+    }
+
+    const lower = original.toLowerCase();
+    let subject = "New chat";
+    if (lower.includes("legal notice")) subject = "Legal notice generation request";
+    else if (lower.includes("suit")) subject = "Suit drafting request";
+    else if (lower.includes("petition")) subject = "Petition drafting request";
+    else if (lower.includes("application")) subject = "Application drafting request";
+    else if (lower.includes("bail")) subject = "Bail application drafting request";
+    else if (lower.includes("affidavit")) subject = "Affidavit preparation request";
+    else subject = original.charAt(0).toUpperCase() + original.slice(1);
+
+    updateSidebarTitle(id, subject);
+    chatState[id] = { ...(chatState[id] || {}), subjectLocked: true };
+    localStorage.setItem(CHAT_STATE_KEY, JSON.stringify(chatState));
+  }
+
   // Helper to detect if text is HTML (starts with <html>, <div>, <!DOCTYPE, etc.)
   function isHtmlContent(text) {
     const trimmed = (text || '').trim();
@@ -468,7 +535,7 @@
     return isHtml;
   }
 
-  function bubble(role, text, isMarkdown = false, referencedPages = null, documentName = null) {
+  function bubble(role, text, isMarkdown = false, referencedPages = null, documentName = null, responseType = null) {
     const div = document.createElement('div');
     div.className = 'bubble ' + (role === 'user' ? 'user' : 'assistant');
     
@@ -481,7 +548,8 @@
       answerBox.className = 'assistant-card answer-content';
       
       // Check if content is HTML (doc-gen output) or Markdown (QA output)
-      if (isHtmlContent(text)) {
+      const treatAsHtml = responseType === 'html' || isHtmlContent(text);
+      if (treatAsHtml) {
         // Render HTML directly for document generation
         answerBox.className = 'assistant-card answer-content html-document';
         answerBox.innerHTML = text;
@@ -543,6 +611,9 @@
         const item = document.createElement('div');
         item.className = 'conv' + (c.id === conversationId ? ' active' : '');
         item.dataset.convId = c.id; // Add data attribute for easier selection
+        if (getChatHasDoc(c.id)) {
+          item.classList.add('has-doc');
+        }
         
         const title = document.createElement('div');
         title.className = 'conv-title';
@@ -588,6 +659,7 @@
       await fetch(`${API}/conversations/${convId}`, {
         method: 'DELETE'
       });
+      clearChatState(convId);
       
       // If we deleted the current conversation, clear it
       if (convId === conversationId) {
@@ -625,6 +697,7 @@
       const data = await r.json();
       conversationId = data.conversation_id;
       localStorage.setItem('conversation_id', conversationId);
+      setChatHasDoc(conversationId, false);
       transcript.innerHTML = '';
       await listConversations();
     } catch (e) {
@@ -645,7 +718,14 @@
       data.forEach(m => {
         // Check if message has markdown metadata (for assistant messages)
         const isMarkdown = m.role === 'assistant';
-        bubble(m.role, m.content, isMarkdown);
+        const respType = (m?.metadata && m.metadata.response_type) || m?.response_type || null;
+        const hasDocMeta = m?.metadata && Object.prototype.hasOwnProperty.call(m.metadata, 'has_doc') ? m.metadata.has_doc : undefined;
+        if (typeof hasDocMeta === 'boolean') {
+          setChatHasDoc(conversationId, hasDocMeta);
+        } else if (respType === 'html') {
+          setChatHasDoc(conversationId, true);
+        }
+        bubble(m.role, m.content, isMarkdown, null, null, respType);
       });
     } catch (e) {
       console.error('Failed to load messages:', e);
@@ -664,12 +744,13 @@
   });
 
   // Streaming helper - displays text word by word
-  async function streamResponse(bubbleDiv, fullText) {
+  async function streamResponse(bubbleDiv, fullText, responseType = null) {
     const contentDiv = bubbleDiv.querySelector('.answer-content') || bubbleDiv.querySelector('div:last-child');
     if (!contentDiv) return;
 
     // Check if content is HTML - if so, render immediately without streaming
-    if (isHtmlContent(fullText)) {
+    const treatAsHtml = responseType === 'html' || isHtmlContent(fullText);
+    if (treatAsHtml) {
       contentDiv.className = 'assistant-card answer-content html-document';
       contentDiv.innerHTML = fullText;
       transcript.scrollTop = transcript.scrollHeight;
@@ -747,16 +828,26 @@
   async function send() {
     const text = input.value.trim();
     if (!text) return;
-    
+
+    if (conversationId && getChatHasDoc(conversationId)) {
+      const lower = text.toLowerCase();
+      if (TWEAK_TRIGGERS.some(trigger => lower.includes(trigger))) {
+        console.log('[DOC-TWEAK] Applying tweak to existing document context.');
+      }
+    }
+
+    if (conversationId && getChatHasDoc(conversationId)) {
+      const lower = text.toLowerCase();
+      if (TWEAK_TRIGGERS.some(trigger => lower.includes(trigger))) {
+        console.log('[DOC-TWEAK] Applying tweak to existing document context.');
+      }
+    }
+
     bubble('user', text);
     input.value = '';
     sendBtn.disabled = true;
 
     if (!conversationId) await newConversation();
-
-    // Auto-update chat title on first message (before API call for instant feedback)
-    const newTitle = normalizeTitleFromText(text);
-    updateSidebarTitle(conversationId, newTitle);
 
     // Create assistant bubble with loading
     const assistantDiv = document.createElement('div');
@@ -774,6 +865,11 @@
     transcript.scrollTop = transcript.scrollHeight;
 
     try {
+      const storedConversation = localStorage.getItem('conversation_id');
+      if (storedConversation) {
+        conversationId = storedConversation;
+      }
+
       const body = {
         query: text,
         conversation_id: conversationId,
@@ -798,7 +894,15 @@
       const content = data?.answer || '[no answer]';
       contentDiv.innerHTML = '';
       
-      await streamResponse(assistantDiv, content);
+      const responseType = data?.metadata?.response_type || null;
+      const hasDocMeta = data?.metadata?.has_doc;
+      if (typeof hasDocMeta === 'boolean') {
+        setChatHasDoc(conversationId, hasDocMeta);
+      } else if (responseType === 'html') {
+        setChatHasDoc(conversationId, true);
+      }
+      await streamResponse(assistantDiv, content, responseType);
+      ensureChatSubject(conversationId, text);
       
       // Add metadata after streaming
       const pages = data?.metadata?.referenced_pages;

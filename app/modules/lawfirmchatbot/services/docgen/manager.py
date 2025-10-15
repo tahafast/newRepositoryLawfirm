@@ -179,6 +179,49 @@ def merge_kv_answers(ans: Dict[str,str], text: str, doc_type: str):
             if f["required"] and not ans.get(f["key"]):
                 ans[f["key"]] = text.strip()
                 break
+    _auto_fill_inline_fields(ans, text)
+
+
+INLINE_FIELD_PATTERNS = {
+    "court": re.compile(r"([A-Z][A-Za-z ]+ Court(?:[, ][A-Za-z ]+)*)"),
+    "case_type_no": re.compile(r"((?:W\.P\.|CMA|Suit|Civil|Case|Appeal)\s*No\.?\s*[A-Za-z0-9/\- ]+)", re.IGNORECASE),
+    "party_role": re.compile(r"\b(petitioner|respondent(?:\s+no\.?\s*\d+)?|defendant|plaintiff|applicant)\b", re.IGNORECASE),
+    "deponent": re.compile(r"\bI,\s*([A-Z][A-Za-z.\s]+?)\s*(?:,|am)\b"),
+    "address": re.compile(r"\bresident of\s+([A-Za-z0-9,\- ]+)", re.IGNORECASE),
+    "place_date": re.compile(r"dated\s+([0-9]{1,2}\s+[A-Za-z]+\s+[0-9]{4})", re.IGNORECASE),
+}
+
+
+def _auto_fill_inline_fields(ans: Dict[str, str], text: str) -> None:
+    """Heuristic extraction for inline details when users provide narrative text."""
+    if not text:
+        return
+
+    if not ans.get("title"):
+        match = re.search(r"([A-Z][A-Za-z& ]+\s+v\.?\s+[A-Z][A-Za-z& ]+)", text)
+        if match:
+            ans["title"] = match.group(1).strip()
+
+    # Iterate over pattern map
+    for key, pattern in INLINE_FIELD_PATTERNS.items():
+        if ans.get(key):
+            continue
+        match = pattern.search(text)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if key == "case_type_no":
+            value = re.sub(r"\s+", " ", value)
+        if key == "party_role":
+            value = match.group(1).strip().title()
+        ans[key] = value
+
+    if not ans.get("facts"):
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        if sentences:
+            snippet = " ".join(sentences[:2]).strip()
+            if len(snippet.split()) >= 12:
+                ans["facts"] = snippet
 
 # -------------------- Retrieve exemplar cues (headings language only) --------------------
 
