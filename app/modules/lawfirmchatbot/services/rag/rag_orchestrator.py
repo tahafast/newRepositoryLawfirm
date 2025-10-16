@@ -53,6 +53,44 @@ FOLLOWUP_KEYWORDS = [
     "keep going", "follow up", "add to that"
 ]
 
+# --- Add skeleton/template keywords (used to allow placeholder docgen) ---
+SKELETON_KEYWORDS = [
+    "skeleton", "format", "template", "placeholders", "placeholder", "sketch", "skeleton of", "format of"
+]
+
+
+def detect_placeholders(user_query: str, state_cache=None) -> bool:
+    """
+    Detect if user intends a skeleton/template or wants placeholders used.
+    Returns True when query explicitly asks for skeleton/template/format/placeholders,
+    or when user issues a minimal 'draft ... between X and Y' that should accept placeholders.
+    """
+    if not user_query:
+        return False
+    text = (user_query or "").lower()
+
+    # explicit keywords
+    for kw in SKELETON_KEYWORDS:
+        if kw in text:
+            return True
+
+    # "use above" or "use details provided above" -> assume placeholders ok
+    if "use above" in text or "use details provided above" in text or "use details provided" in text:
+        return True
+
+    # "draft ... between A and B" or "suit between A and B" minimal-names heuristic
+    # look for 'between <Name> and <Name>' where Name is capitalized-ish
+    m = re.search(r"\bbetween\s+([A-Z][a-zA-Z.\- ]{1,40}?)\s+and\s+([A-Z][a-zA-Z.\- ]{1,40}?)", user_query)
+    if m:
+        return True
+
+    # short form: "draft a suit between muhammad bilal and taha rahat" (lowercase names) -> also allow
+    m2 = re.search(r"\bdraft\b.*\bbetween\b.*\band\b", text)
+    if m2:
+        return True
+
+    return False
+
 def _looks_like_docgen(q: str) -> bool:
     """Detect if query looks like document generation request."""
     t = (q or "").lower()
@@ -696,6 +734,12 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
         state_cache = await get_conversation_state(conversation_id)
         detected_mode_label = detect_mode(resolved_query, state_cache)
 
+        # Detect if user explicitly asked for skeleton/template/placeholders mode
+        placeholders = detect_placeholders(resolved_query, state_cache)
+
+        if settings.DEBUG_RAG:
+            logger.info(f"[RAG-DEBUG] Detected mode={detected_mode_label}, placeholders={placeholders}")
+
         if detected_mode_label == "tweak_doc" and state_cache.last_document:
             logger.info(f"[DocGen] Tweak request detected; reusing last document (doc_type={state_cache.last_doc_type})")
             prior_doc = state_cache.last_document.strip()
@@ -801,14 +845,14 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
                 }
             }
 
-        
-        
+        # --- DOCGEN intake + missing-fields logic (respects placeholders flag) ---
         docgen_context_fields: Dict[str, str] = {}
         if detected_mode_label == "docgen":
             extracted_info = extract_case_info(resolved_query)
             extracted_data = extracted_info.get("data", {}) or {}
             docgen_context_fields = dict(getattr(state_cache, "doc_fields", {}) or {})
 
+            # merge any newly extracted data
             for key, value in extracted_data.items():
                 if key not in docgen_context_fields:
                     docgen_context_fields[key] = value
@@ -818,7 +862,8 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
             state_cache.doc_fields = docgen_context_fields
             filled_count = sum(1 for v in docgen_context_fields.values() if v)
 
-            if filled_count < 3:
+            # If user asked for placeholders/skeleton/template => proceed even if fields < threshold
+            if filled_count < 3 and not placeholders:
                 missing_fields = [k for k, v in docgen_context_fields.items() if not v]
                 missing_list = ", ".join(field.replace("_", " ") for field in missing_fields) or "additional case details"
                 ask_text = f"To draft your document, please provide the following missing details: {missing_list}."
@@ -1201,6 +1246,13 @@ OUTPUT RULES:
                 logger.info(f"[RAG-DEBUG] Sending to LLM: {len(messages)} messages, total_chars={total_prompt_chars}, est_tokens={total_prompt_chars//4}")
                 logger.info(f"[RAG-DEBUG] System prompt preview: {messages[0]['content'][:200]}...")
                 logger.info(f"[RAG-DEBUG] User prompt preview: {messages[-1]['content'][:500]}...")
+
+        # Log final routing decision (helpful to debug which model & mode are actually invoked)
+        try:
+            logger.info(f"[routing] mode={mode} placeholders={placeholders} intent={intent_label} target_model={target_model} use_stream={use_stream} extra_params_keys={list(extra_llm_params.keys())}")
+        except Exception:
+            # safe-guard in logs
+            logger.info(f"[routing] mode={mode} target_model={target_model}")
 
         t_llm_start = time.time()
         raw_response = await chat_completion(
