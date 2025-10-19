@@ -2,6 +2,7 @@ from typing import Iterable, List, Dict, Any, Optional
 import time
 import logging
 from qdrant_client import QdrantClient
+from qdrant_client import models as qmodels
 from qdrant_client.http.models import Distance, VectorParams, PointStruct, HnswConfigDiff, PayloadSchemaType
 from langchain.schema import Document
 from core.config import settings
@@ -353,3 +354,174 @@ def points_count(client: QdrantClient) -> int:
     except Exception:
         info = client.get_collection(name)
         return getattr(info, "points_count", 0) or 0
+
+
+def _unpack_scroll_result(res):
+    """Support both tuple and ScrollResult outputs from qdrant-client."""
+    if isinstance(res, tuple):
+        points, next_page = res
+    else:
+        points = getattr(res, "points", []) or []
+        next_page = (
+            getattr(res, "next_page_offset", None)
+            or getattr(res, "next_point_offset", None)
+            or getattr(res, "offset", None)
+        )
+    return points, next_page
+
+
+def list_documents_in_alias(
+    alias: str | None = None,
+    limit: int = 100000,
+) -> List[Dict[str, Any]]:
+    """
+    Aggregate by document/source and return:
+    [{document, total_chunks, min_page, max_page, first_seen, last_seen}]
+    """
+    client = get_qdrant_client()
+    collection = alias or settings.QDRANT_COLLECTION_ALIAS or settings.QDRANT_COLLECTION
+
+    all_docs: Dict[str, Dict[str, Any]] = {}
+    next_page = None
+    scanned = 0
+    hard_limit = max(limit, 0) if limit is not None else None
+
+    while True:
+        if hard_limit is not None and scanned >= hard_limit:
+            break
+
+        batch_limit = 1000
+        if hard_limit is not None:
+            batch_limit = max(1, min(1000, hard_limit - scanned))
+
+        res = client.scroll(
+            collection_name=collection,
+            with_vectors=False,
+            with_payload=True,
+            limit=batch_limit,
+            offset=next_page,
+        )
+
+        points, next_page = _unpack_scroll_result(res)
+        if not points:
+            break
+
+        scanned += len(points)
+
+        for p in points:
+            pl = p.payload or {}
+            doc_name = (
+                pl.get("document")
+                or pl.get("source")
+                or pl.get("title")
+                or "Unknown Document"
+            )
+            page = (
+                pl.get("page")
+                or pl.get("page_number")
+                or pl.get("page_index")
+            )
+            ts = pl.get("ingested_at") or pl.get("timestamp") or pl.get("created_at")
+
+            bucket = all_docs.setdefault(
+                doc_name,
+                {
+                    "document": doc_name,
+                    "total_chunks": 0,
+                    "min_page": None,
+                    "max_page": None,
+                    "first_seen": ts,
+                    "last_seen": ts,
+                },
+            )
+            bucket["total_chunks"] += 1
+
+            if isinstance(page, (int, float)):
+                page_i = int(page)
+                bucket["min_page"] = (
+                    page_i
+                    if bucket["min_page"] is None
+                    else min(bucket["min_page"], page_i)
+                )
+                bucket["max_page"] = (
+                    page_i
+                    if bucket["max_page"] is None
+                    else max(bucket["max_page"], page_i)
+                )
+
+            if ts:
+                ts_str = str(ts)
+                if not bucket["first_seen"] or ts_str < str(bucket["first_seen"]):
+                    bucket["first_seen"] = ts
+                if not bucket["last_seen"] or ts_str > str(bucket["last_seen"]):
+                    bucket["last_seen"] = ts
+
+        if next_page is None:
+            break
+
+    docs = list(all_docs.values())
+    docs.sort(
+        key=lambda d: (
+            str(d.get("last_seen") or ""),
+            d["document"],
+        ),
+        reverse=True,
+    )
+    return docs
+
+
+def list_document_samples(
+    document_name: str,
+    alias: str | None = None,
+    k: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch up to k sample chunks for a single document (ordered by page ASC).
+    Works whether your payload uses 'document' or 'source', and tries multiple
+    text keys in order: 'text' -> 'page_content' -> 'chunk' -> 'content'.
+    """
+    client = get_qdrant_client()
+    collection = alias or settings.QDRANT_COLLECTION_ALIAS or settings.QDRANT_COLLECTION
+
+    def _search_by_key(key: str):
+        res = client.scroll(
+            collection_name=collection,
+            with_vectors=False,
+            with_payload=True,
+            limit=2000,
+            scroll_filter=qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key=key,
+                        match=qmodels.MatchText(text=document_name),
+                    )
+                ]
+            ),
+        )
+        return _unpack_scroll_result(res)
+
+    points, _ = _search_by_key("document")
+    if not points:
+        points, _ = _search_by_key("source")
+
+    rows: List[Dict[str, Any]] = []
+    for pt in points:
+        pl = pt.payload or {}
+        page = pl.get("page") or pl.get("page_number") or pl.get("page_index")
+        txt = (
+            pl.get("text")
+            or pl.get("page_content")
+            or pl.get("chunk")
+            or pl.get("content")
+            or ""
+        )
+        rows.append(
+            {
+                "page": int(page) if isinstance(page, (int, float)) else None,
+                "text": txt,
+                "source": pl.get("document") or pl.get("source") or document_name,
+            }
+        )
+
+    rows.sort(key=lambda r: (999999 if r["page"] is None else r["page"]))
+    return rows[:k]

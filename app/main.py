@@ -7,6 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, PlainTextResponse
 from app.modules.router import router as modules_router
+from app.modules.lawfirm.api.router_indexed_docs import (
+    router as indexed_docs_router,
+)
 from core.config import settings, wire_services, perform_warmup
 from core.logging import get_logger
 logger = get_logger(__name__)
@@ -16,6 +19,7 @@ def create_app():
     app = FastAPI(title="Law Firm Chatbot")
     wire_services(app)
     app.include_router(modules_router)
+    app.include_router(indexed_docs_router, prefix="/api/v1/lawfirm")
 
     # --- CORS (allow local static servers & file:// testing) ---
     allow_origins = os.getenv("CORS_ALLOW_ORIGINS", "*")

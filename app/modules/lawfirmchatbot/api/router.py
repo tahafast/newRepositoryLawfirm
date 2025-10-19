@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from typing import List, Dict, Any
 from pydantic import BaseModel
 import logging
@@ -16,6 +16,7 @@ from app.modules.lawfirmchatbot.services.document_service import (
     process_document_upload,
     process_document_query
 )
+from app.modules.lawfirmchatbot.services.vector_store import list_document_samples
 
 # Import memory services
 from app.services.memory.db import get_db
@@ -31,6 +32,20 @@ v1 = APIRouter(prefix="/api/v1/lawfirm", tags=["Law Firm Chatbot"])
 # @v1.post("/upload-document") ...
 # @v1.post("/query") ...
 router = v1  # optional alias for external imports
+
+
+@v1.get("/docs/indexed/samples")
+async def get_indexed_doc_samples(
+    document: str = Query(..., description="Exact document name to preview"),
+    alias: str | None = Query(None),
+    k: int = Query(5, ge=1, le=10),
+) -> Dict[str, Any]:
+    try:
+        samples = list_document_samples(document_name=document, alias=alias, k=k)
+        return {"success": True, "document": document, "items": samples}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 
 @v1.post(
     "/upload-document",

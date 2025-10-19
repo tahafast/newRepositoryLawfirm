@@ -7,7 +7,7 @@
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
   <title>BRAG AI — Chat</title>
-  <link rel="stylesheet" href="./styles.css"/>
+  <link rel="stylesheet" href="./styles.css?v=1.1.3"/>
   <script src="./theme.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
@@ -31,12 +31,16 @@
       background: var(--chat-bg);
       color: var(--text);
       font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
       overflow: hidden;
     }
 
     .app {
       display: flex;
-      height: 100vh;
+      flex: 1;
+      min-height: 0;
     }
 
     /* Sidebar */
@@ -409,15 +413,24 @@
   </style>
 </head>
 <body>
-<div class="app">
+  <header class="header flex items-center justify-between px-6 py-4">
+    <div class="flex items-center space-x-3">
+      <div class="logo bg-blue-600 text-white font-bold rounded-full w-8 h-8 flex items-center justify-center text-lg">B</div>
+      <span class="brand text-lg font-semibold tracking-wide text-gray-900 dark:text-white">BRAG AI (LEGAL)</span>
+    </div>
+    <nav class="flex items-center space-x-4">
+      <a href="./index.html" class="text-sm font-medium hover:underline">Home</a>
+      <a href="./ingest.html" class="text-sm font-medium hover:underline">Ingest</a>
+      <a href="./chat.html" class="text-sm font-medium hover:underline">Chat</a>
+      <button onclick="__bragaiTheme.toggleTheme()" data-theme-toggle class="theme-toggle border rounded-xl px-3 py-1 text-sm flex items-center">
+        &#127769; Dark
+      </button>
+    </nav>
+  </header>
+
+  <div class="app">
   <!-- Sidebar -->
   <aside class="sidebar">
-    <div class="sb-head">
-      <a href="./index.html" class="brand" id="brand-link" style="text-decoration: none; color: var(--text);">
-        <img src="./logo.svg" alt="BRAG AI"/>
-        <span>BRAG AI</span>
-      </a>
-    </div>
     <div class="sb-head" style="border-top: 1px solid var(--border); border-bottom: none;">
       <button class="chat-btn primary" id="newChat" style="flex: 1;">+ New Chat</button>
       <button class="chat-btn" id="refreshChats" title="Refresh conversations">↻</button>
@@ -429,11 +442,6 @@
   <main class="main">
     <div class="chat-header">
       <h2>Chat</h2>
-      <div style="display: flex; gap: 8px; align-items: center;">
-        <a href="./index.html" class="chat-btn" style="text-decoration: none; display: inline-block;">Home</a>
-        <a href="./ingest.html" class="chat-btn" style="text-decoration: none; display: inline-block;">Ingest</a>
-        <button class="chat-btn" data-theme-toggle onclick="__bragaiTheme.toggleTheme()" style="border-color: var(--border);">🌙 Dark</button>
-      </div>
     </div>
     <div class="chat" id="transcript"></div>
     <div class="composer">
@@ -968,12 +976,5 @@
   });
   </script>
   
-  <script>
-    // Ensure brand logo click navigates home
-    document.getElementById('brand-link').addEventListener('click', (e) => {
-      e.preventDefault(); 
-      window.location.href = './index.html';
-    });
-  </script>
 </body>
 </html>

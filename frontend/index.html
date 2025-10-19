@@ -4,20 +4,23 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>BRAG AI — Legal RAG</title>
-  <link rel="stylesheet" href="./styles.css"/>
+  <link rel="stylesheet" href="./styles.css?v=1.1.3"/>
   <script src="./theme.js"></script>
 </head>
 <body>
-  <header class="header">
-    <a class="brand" href="./index.html" id="brand-link">
-      <div class="logo">B</div>
-      <strong>BRAG AI (LEGAL)</strong>
-    </a>
-    <div class="toolbar">
-      <a class="nav-link" href="./ingest.html">Ingest</a>
-      <a class="nav-link" href="./chat.html">Chat</a>
-      <button class="btn-ghost" data-theme-toggle onclick="__bragaiTheme.toggleTheme()">🌙 Dark</button>
+  <header class="header flex items-center justify-between px-6 py-4">
+    <div class="flex items-center space-x-3">
+      <div class="logo bg-blue-600 text-white font-bold rounded-full w-8 h-8 flex items-center justify-center text-lg">B</div>
+      <span class="brand text-lg font-semibold tracking-wide text-gray-900 dark:text-white">BRAG AI (LEGAL)</span>
     </div>
+    <nav class="flex items-center space-x-4">
+      <a href="./index.html" class="text-sm font-medium hover:underline">Home</a>
+      <a href="./ingest.html" class="text-sm font-medium hover:underline">Ingest</a>
+      <a href="./chat.html" class="text-sm font-medium hover:underline">Chat</a>
+      <button onclick="__bragaiTheme.toggleTheme()" data-theme-toggle class="theme-toggle border rounded-xl px-3 py-1 text-sm flex items-center">
+        &#127769; Dark
+      </button>
+    </nav>
   </header>
 
   <main class="container">
@@ -33,11 +36,5 @@
     </section>
   </main>
 
-  <script>
-    // Ensure brand always routes home (in case of base href changes)
-    document.getElementById('brand-link').addEventListener('click', (e) => {
-      e.preventDefault(); window.location.href = './index.html';
-    });
-  </script>
 </body>
 </html>

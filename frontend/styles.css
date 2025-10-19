@@ -65,6 +65,10 @@ html, body {
 a { color: var(--brand-600); text-decoration: none; }
 a:hover { color: var(--brand-700); text-decoration: underline; }
 
+.muted {
+  color: var(--muted);
+}
+
 /* ===== HEADER / TOOLBAR ===== */
 .header {
   display: flex;
@@ -457,4 +461,994 @@ footer {
   .hero {
     padding: 24px 18px;
   }
+}
+.docs-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-end;
+  margin: 20px 0 16px;
+}
+
+.docs-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+  flex: 1 1 220px;
+}
+
+.docs-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.docs-input {
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.6);
+  font-size: 14px;
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .docs-input {
+  background: rgba(15,23,42,0.7);
+}
+
+.docs-input:focus {
+  outline: none;
+  border-color: var(--brand-400);
+  box-shadow: 0 0 0 3px rgba(45,108,255,0.15);
+}
+
+.docs-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: auto;
+}
+
+.docs-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 640px;
+}
+
+.docs-table thead {
+  background: rgba(148,182,255,0.08);
+}
+
+:root[data-theme="dark"] .docs-table thead {
+  background: rgba(59,76,117,0.25);
+}
+
+.docs-table th,
+.docs-table td {
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.docs-table th[data-sort-key] {
+  cursor: pointer;
+  user-select: none;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.docs-table th[data-sort-key]:hover {
+  color: var(--brand-600);
+}
+
+.docs-table tbody tr:hover {
+  background: rgba(45,108,255,0.06);
+}
+
+:root[data-theme="dark"] .docs-table tbody tr:hover {
+  background: rgba(104,143,255,0.08);
+}
+
+.docs-sort-indicator {
+  font-size: 12px;
+  margin-left: 4px;
+  opacity: 0.8;
+}
+
+.docs-empty-row td {
+  padding: 28px 14px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.docs-preview-btn {
+  border-radius: var(--r-sm);
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  background: transparent;
+  font-size: 13px;
+  color: var(--brand-600);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.docs-preview-btn:hover {
+  background: rgba(45,108,255,0.12);
+  border-color: var(--brand-300);
+}
+
+:root[data-theme="dark"] .docs-preview-btn:hover {
+  background: rgba(148,182,255,0.18);
+}
+
+.docs-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 11, 25, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 200;
+}
+
+.docs-modal.docs-hidden {
+  display: none;
+}
+
+.docs-modal-content {
+  width: min(720px, 92vw);
+  max-height: 80vh;
+  background: var(--panel);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border);
+  box-shadow: 0 20px 40px rgba(4, 14, 34, 0.25);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.docs-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.docs-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.docs-preview-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 14px 16px;
+  background: rgba(148, 182, 255, 0.06);
+}
+
+:root[data-theme="dark"] .docs-preview-card {
+  background: rgba(62, 84, 128, 0.35);
+}
+
+.docs-preview-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.docs-preview-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.docs-preview-text em {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.docs-preview-empty {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+#indexedDocsScrollBox {
+  scrollbar-width: thin;
+  scrollbar-color: #3b82f6 #0b1120;
+}
+#indexedDocsScrollBox::-webkit-scrollbar {
+  width: 8px;
+}
+#indexedDocsScrollBox::-webkit-scrollbar-thumb {
+  background-color: #3b82f6;
+  border-radius: 4px;
+}
+
+/* --------------------------- */
+/* 1️⃣ Global font consistency  */
+/* --------------------------- */
+body, .card, .table, input, button, h1, h2, h3, h4, h5, h6 {
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  font-weight: 400;
+  color: var(--text-color, #e2e8f0);
+}
+
+/* --------------------------- */
+/* 2️⃣ Spacing between cards    */
+/* --------------------------- */
+.card + .card,
+.card + section,
+section + section {
+  margin-top: 2rem !important;
+}
+
+/* --------------------------- */
+/* 3️⃣ Navbar opacity fix       */
+/* --------------------------- */
+.header {
+  background-color: var(--header-bg, rgba(15, 23, 42, 0.95));
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+}
+
+/* Ensure content starts below sticky header */
+.container {
+  padding-top: 80px;
+}
+
+/* --------------------------- */
+/* 4️⃣ Light/Dark theme support */
+/* --------------------------- */
+
+/* DARK MODE (default) */
+body[data-theme="dark"] {
+  --card-bg: #0b1120;
+  --border-color: #1e293b;
+  --header-bg: rgba(15, 23, 42, 0.95);
+  --text-color: #e2e8f0;
+}
+
+/* LIGHT MODE */
+body[data-theme="light"] {
+  --card-bg: #f9fafb;
+  --border-color: #d1d5db;
+  --header-bg: rgba(255, 255, 255, 0.9);
+  --text-color: #111827;
+}
+
+/* Apply theme variables */
+.card {
+  background-color: var(--card-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+  border-radius: 12px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+}
+
+#indexedDocsScrollBox {
+  background-color: var(--card-bg);
+  border: 1px solid var(--border-color);
+}
+
+/* Sticky table header */
+#indexedDocsScrollBox thead {
+  background-color: var(--header-bg);
+  color: var(--text-color);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+/* ========================================================== */
+/* THEME-SYNCED STYLES for BRAG AI UI (Upload + Indexed Docs) */
+/* ========================================================== */
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Unified card design */
+.card {
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--card-shadow);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 1.5rem;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Header (navbar) */
+.header {
+  background-color: var(--panel);
+  color: var(--text);
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+/* Keep spacing between Upload + Indexed sections */
+.card + #indexedDocsSection {
+  margin-top: 2rem;
+}
+
+/* Indexed documents section scroll container */
+#indexedDocsScrollBox {
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  max-height: 420px;
+  min-height: 300px;
+  overflow-y: auto;
+  border-radius: 10px;
+}
+
+/* Table styling consistent with theme */
+#indexedDocsScrollBox table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--text);
+}
+
+#indexedDocsScrollBox th,
+#indexedDocsScrollBox td {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+}
+
+#indexedDocsScrollBox thead {
+  background-color: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+/* Alternate row backgrounds for readability */
+#indexedDocsScrollBox tbody tr:nth-child(even) {
+  background-color: var(--bg);
+}
+
+/* Buttons adapt to theme */
+button,
+.btn,
+.btn-primary {
+  background-color: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.25s ease;
+}
+
+button:hover,
+.btn:hover,
+.btn-primary:hover {
+  background-color: #1d4ed8;
+}
+
+/* ======================================================= */
+/* FIXES - Headings, Buttons, and Link Visibility          */
+/* ======================================================= */
+
+/* Headings */
+h1, h2, h3, h4, h5, h6 {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Paragraph and small text */
+p, .small, label {
+  color: var(--text);
+}
+
+/* Buttons in light mode */
+[data-theme="light"] button,
+[data-theme="light"] .btn,
+[data-theme="light"] .btn-primary {
+  background-color: var(--accent);
+  color: #fff;
+}
+
+/* Secondary buttons in light mode */
+[data-theme="light"] .btn-secondary {
+  background-color: #fff;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+/* Buttons in dark mode */
+[data-theme="dark"] button,
+[data-theme="dark"] .btn,
+[data-theme="dark"] .btn-primary {
+  background-color: var(--accent);
+  color: #fff;
+}
+
+/* Secondary buttons in dark mode */
+[data-theme="dark"] .btn-secondary {
+  background-color: var(--panel);
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+
+/* Links and nav links */
+a, .nav-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover, .nav-link:hover {
+  opacity: 0.8;
+}
+
+/* Card kicker (like 'Ingestion', 'Index Overview') */
+.kicker {
+  color: var(--accent);
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 0.8rem;
+  letter-spacing: 0.05em;
+}
+
+* {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* ======================================================= */
+/* FINAL FIX - Buttons, Accents, and Readability           */
+/* ======================================================= */
+
+/* Primary buttons (Upload, Show all, Go to Chat, etc.) */
+.btn,
+button,
+.btn-primary {
+  background-color: var(--accent) !important;
+  color: #ffffff !important;
+  border: none;
+  border-radius: 8px;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: background-color 0.25s ease, transform 0.1s ease;
+}
+
+.btn:hover,
+button:hover,
+.btn-primary:hover {
+  background-color: #1d4ed8 !important; /* darker blue hover */
+  transform: translateY(-1px);
+}
+
+/* Secondary buttons (outlined ones like 'Go to Chat') */
+.btn-secondary {
+  background-color: transparent !important;
+  border: 1px solid var(--accent) !important;
+  color: var(--accent) !important;
+  border-radius: 8px;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  transition: all 0.25s ease;
+}
+
+.btn-secondary:hover {
+  background-color: var(--accent) !important;
+  color: #ffffff !important;
+}
+
+/* Fix form inputs to stay readable */
+input,
+textarea,
+select {
+  background-color: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+input::placeholder {
+  color: var(--muted);
+}
+
+/* Small text (status, help, muted lines) */
+.small,
+.text-muted {
+  color: var(--muted);
+}
+
+/* Fix upload form spacing */
+.cta {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/* Ensure accent consistency for clickable links */
+a,
+.nav-link {
+  color: var(--accent);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+a:hover,
+.nav-link:hover {
+  opacity: 0.8;
+}
+
+/* Reassert kicker styling (INGESTION, INDEX OVERVIEW) */
+.kicker {
+  color: var(--accent);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  letter-spacing: 0.05em;
+}
+
+/* ========================================================= */
+/* FINAL PATCH - Fix invisible buttons & missing borders     */
+/* ========================================================= */
+
+/* Primary buttons (Upload, Show All, etc.) */
+.btn,
+button,
+.btn-primary {
+  background-color: var(--accent) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--accent) !important;
+  border-radius: 8px;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  transition: background-color 0.25s ease, color 0.25s ease, transform 0.1s ease;
+}
+
+.btn:hover,
+button:hover,
+.btn-primary:hover {
+  background-color: #1d4ed8 !important;
+  border-color: #1d4ed8 !important;
+  color: #fff !important;
+  transform: translateY(-1px);
+}
+
+/* Secondary buttons (Go to Chat / Go to Ingestion) */
+.btn-secondary {
+  background-color: transparent !important;
+  border: 1px solid var(--accent) !important;
+  color: var(--accent) !important;
+  border-radius: 8px;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  transition: all 0.25s ease;
+}
+
+.btn-secondary:hover {
+  background-color: var(--accent) !important;
+  color: #ffffff !important;
+}
+
+/* Ghost buttons (top-right Light/Dark theme toggle) */
+.btn-ghost {
+  background-color: transparent !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px;
+  font-weight: 500;
+  padding: 0.4rem 0.8rem;
+  transition: all 0.25s ease;
+}
+
+.btn-ghost:hover {
+  background-color: var(--accent) !important;
+  color: #fff !important;
+  border-color: var(--accent) !important;
+}
+
+/* Fix input, search, etc. */
+input,
+textarea,
+select {
+  background-color: var(--panel) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+input::placeholder {
+  color: var(--muted);
+}
+
+/* For both modes, make sure buttons have visible text always */
+[data-theme="light"] .btn,
+[data-theme="light"] .btn-primary,
+[data-theme="light"] button {
+  background-color: var(--accent) !important;
+  color: #fff !important;
+}
+
+[data-theme="dark"] .btn,
+[data-theme="dark"] .btn-primary,
+[data-theme="dark"] button {
+  background-color: var(--accent) !important;
+  color: #fff !important;
+}
+
+/* ========================================================= */
+/* 🧭 GLOBAL BUTTON THEME FIX — ROYAL BLUE (FINAL VERSION)    */
+/* ========================================================= */
+
+/* Root variables */
+:root {
+  --royal-blue: #2563eb; /* Primary theme color */
+  --royal-blue-hover: #1e40af;
+  --white: #ffffff;
+  --black: #000000;
+  --gray-light: #e5e7eb;
+  --gray-dark: #1e293b;
+}
+
+/* Light mode adjustments */
+[data-theme="light"] {
+  --btn-bg: var(--royal-blue);
+  --btn-text: var(--white);
+  --btn-border: var(--royal-blue);
+  --btn-hover-bg: var(--royal-blue-hover);
+  --btn-hover-text: var(--white);
+  --btn-hover-border: var(--royal-blue-hover);
+}
+
+/* Dark mode adjustments */
+[data-theme="dark"] {
+  --btn-bg: var(--royal-blue);
+  --btn-text: var(--white);
+  --btn-border: var(--royal-blue);
+  --btn-hover-bg: var(--royal-blue-hover);
+  --btn-hover-text: var(--white);
+  --btn-hover-border: var(--royal-blue-hover);
+}
+
+/* ======================== */
+/* BUTTON CORE STYLES       */
+/* ======================== */
+
+button,
+.btn,
+.btn-primary,
+.btn-secondary,
+.btn-ghost {
+  background-color: var(--btn-bg) !important;
+  color: var(--btn-text) !important;
+  border: 1px solid var(--btn-border) !important;
+  border-radius: 10px;
+  font-weight: 500;
+  font-size: 0.95rem;
+  padding: 0.55rem 1.2rem;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2);
+}
+
+/* Hover, focus, and active states */
+button:hover,
+.btn:hover,
+.btn-primary:hover,
+.btn-secondary:hover,
+.btn-ghost:hover {
+  background-color: var(--btn-hover-bg) !important;
+  color: var(--btn-hover-text) !important;
+  border-color: var(--btn-hover-border) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(37, 99, 235, 0.3);
+}
+
+button:active,
+.btn:active {
+  transform: scale(0.98);
+  box-shadow: 0 2px 4px rgba(37, 99, 235, 0.4);
+}
+
+/* ======================== */
+/* GHOST / NAVBAR BUTTONS   */
+/* ======================== */
+
+.btn-ghost {
+  background-color: transparent !important;
+  color: var(--btn-text) !important;
+  border: 1px solid var(--btn-border) !important;
+  box-shadow: none !important;
+}
+
+.btn-ghost:hover {
+  background-color: var(--btn-hover-bg) !important;
+  color: var(--white) !important;
+  border-color: var(--btn-hover-border) !important;
+}
+
+/* ======================== */
+/* SPECIAL FIXES            */
+/* ======================== */
+
+/* Fix buttons that lose visibility in light mode */
+[data-theme="light"] .btn,
+[data-theme="light"] button {
+  color: var(--white) !important;
+  background-color: var(--royal-blue) !important;
+  border: 1px solid var(--royal-blue) !important;
+}
+
+/* Fix buttons that blend in dark mode */
+[data-theme="dark"] .btn,
+[data-theme="dark"] button {
+  color: var(--white) !important;
+  background-color: var(--royal-blue) !important;
+  border: 1px solid var(--royal-blue) !important;
+}
+
+/* Make theme toggle button clearly visible */
+.theme-toggle,
+[data-theme="light"] .theme-toggle,
+[data-theme="dark"] .theme-toggle {
+  background-color: transparent !important;
+  border: 1px solid var(--gray-light) !important;
+  color: var(--black) !important;
+  transition: all 0.25s ease;
+  border-radius: 8px;
+  padding: 0.35rem 0.75rem;
+}
+
+[data-theme="dark"] .theme-toggle {
+  color: var(--white) !important;
+  border-color: var(--gray-dark) !important;
+}
+
+.theme-toggle:hover {
+  background-color: var(--royal-blue) !important;
+  border-color: var(--royal-blue) !important;
+  color: #fff !important;
+}
+
+/* ======================== */
+/* INTERACTION POLISH       */
+/* ======================== */
+
+button:focus-visible,
+.btn:focus-visible {
+  outline: 2px solid var(--royal-blue-hover) !important;
+  outline-offset: 3px;
+}
+
+/* Make hover feel smooth and interactive */
+button,
+.btn {
+  transform-origin: center;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+/* Cursor feedback */
+button:disabled,
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* ========================================================= */
+/* ✨ MATERIAL RIPPLE EFFECT + INTERACTIVE GLOW (FINAL)      */
+/* ========================================================= */
+
+/* Shared ripple base */
+button,
+.btn,
+.btn-primary,
+.btn-secondary,
+.btn-ghost {
+  position: relative;
+  overflow: hidden; /* ensure ripple stays inside */
+  isolation: isolate; /* fix ripple stacking */
+}
+
+/* Ripple pseudo-element */
+button::after,
+.btn::after,
+.btn-primary::after,
+.btn-secondary::after,
+.btn-ghost::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Ripple animation */
+button:active::after,
+.btn:active::after {
+  width: 200%;
+  height: 200%;
+  opacity: 1;
+  transition: width 0.4s ease-out, height 0.4s ease-out, opacity 0.6s ease-out;
+}
+
+button::after,
+.btn::after {
+  transition: opacity 0.6s ease-out;
+}
+
+/* Light/dark adaptive hover glow */
+[data-theme="light"] button:hover,
+[data-theme="light"] .btn:hover {
+  box-shadow: 0 0 12px rgba(37, 99, 235, 0.35), 0 4px 8px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="dark"] button:hover,
+[data-theme="dark"] .btn:hover {
+  box-shadow: 0 0 14px rgba(37, 99, 235, 0.55), 0 4px 10px rgba(0, 0, 0, 0.4);
+}
+
+/* Add pressed feedback */
+button:active,
+.btn:active {
+  transform: scale(0.97);
+  transition: transform 0.1s ease;
+}
+
+/* Accessibility focus ring */
+button:focus-visible,
+.btn:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.6);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
+}
+
+/* Add smooth transition reset after click */
+button:not(:active)::after,
+.btn:not(:active)::after {
+  transition: transform 0.6s ease-out, opacity 0.8s ease-out;
+}
+
+/* ========================================================= */
+/* GLOBAL NAV UTILITY HELPERS                                */
+/* ========================================================= */
+
+.flex {
+  display: flex;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.justify-between {
+  justify-content: space-between;
+}
+
+.justify-center {
+  justify-content: center;
+}
+
+.space-x-3 {
+  gap: 0.75rem;
+}
+
+.space-x-4 {
+  gap: 1rem;
+}
+
+.px-6 {
+  padding-left: 1.5rem;
+  padding-right: 1.5rem;
+}
+
+.py-4 {
+  padding-top: 1rem;
+  padding-bottom: 1rem;
+}
+
+.px-3 {
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+}
+
+.py-1 {
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+}
+
+.bg-blue-600 {
+  background-color: #2563eb;
+}
+
+.text-white {
+  color: #ffffff;
+}
+
+.text-gray-900 {
+  color: #111827;
+}
+
+[data-theme="dark"] .text-gray-900 {
+  color: var(--text);
+}
+
+.dark\:text-white {
+  color: inherit;
+}
+
+[data-theme="dark"] .dark\:text-white {
+  color: #ffffff;
+}
+
+.font-bold {
+  font-weight: 700;
+}
+
+.font-semibold {
+  font-weight: 600;
+}
+
+.font-medium {
+  font-weight: 500;
+}
+
+.text-lg {
+  font-size: 1.125rem;
+  line-height: 1.5rem;
+}
+
+.text-sm {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.tracking-wide {
+  letter-spacing: 0.05em;
+}
+
+.rounded-full {
+  border-radius: 9999px;
+}
+
+.rounded-xl {
+  border-radius: 0.75rem;
+}
+
+.w-8 {
+  width: 2rem;
+}
+
+.h-8 {
+  height: 2rem;
+}
+
+.hover\:underline:hover {
+  text-decoration: underline;
 }
