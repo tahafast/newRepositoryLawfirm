@@ -4,7 +4,7 @@ import logging
 from qdrant_client import QdrantClient
 from qdrant_client import models as qmodels
 from qdrant_client.http.models import Distance, VectorParams, PointStruct, HnswConfigDiff, PayloadSchemaType
-from langchain.schema import Document
+from langchain_core.documents import Document
 from core.config import settings
 
 # Initialize logging and settings

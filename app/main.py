@@ -1,6 +1,7 @@
 # app/main.py
 import os
 import logging
+import uvicorn
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -92,3 +93,8 @@ async def startup_event():
     await perform_warmup(app)
     
     logger.info("Application startup completed successfully")
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port)
