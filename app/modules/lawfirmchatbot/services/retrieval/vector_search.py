@@ -1,12 +1,14 @@
 """Vector search service using Qdrant with robust error handling."""
 
 from typing import List, Dict, Any, Optional, Sequence
-from langchain.schema import Document
+from app.modules.lawfirmchatbot.services._lc_compat import ensure_Document
 from qdrant_client.models import PointStruct
 import logging
 import asyncio
 import uuid
 import typing as t
+
+Document = ensure_Document()
 
 from app.modules.lawfirmchatbot.services.vector_store import get_qdrant, search_similar, upsert_embeddings
 from app.modules.lawfirmchatbot.services.llm import embed_text_async
