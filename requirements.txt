@@ -25,8 +25,10 @@ uvicorn==0.34.0
 wsproto==1.2.0
 
 # RAG and Document Processing
+# LangChain modern split + pins compatible with v0.1+ API layout
 langchain>=0.2.0
 langchain-core>=0.2.0
+langchain-text-splitters>=0.0.1
 langchain-openai>=0.1.0
 langchain-google-genai>=0.0.6
 PyPDF2>=3.0.1
@@ -34,8 +36,10 @@ python-docx==1.1.2
 qdrant-client>=1.8.0
 striprtf>=0.0.26
 
+# OpenAI Python SDK (needed when using langchain-openai)
+openai>=1.30.0
+
 # AI and ML
-openai>=1.12.0
 numpy>=1.24.3
 aiohttp>=3.10.5
 

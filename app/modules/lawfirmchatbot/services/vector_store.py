@@ -4,7 +4,10 @@ import logging
 from qdrant_client import QdrantClient
 from qdrant_client import models as qmodels
 from qdrant_client.http.models import Distance, VectorParams, PointStruct, HnswConfigDiff, PayloadSchemaType
-from langchain_core.documents import Document
+from app.modules.lawfirmchatbot.services._lc_compat import (
+    ensure_Document,
+    ensure_OpenAIEmbeddings,
+)
 from core.config import settings
 
 # Initialize logging and settings
@@ -13,6 +16,9 @@ logger = logging.getLogger("qdrant.client")
 
 _ALIAS_ENABLED = True  # flipped off if alias ops unsupported/fail
 
+
+Document = ensure_Document()
+OpenAIEmbeddings = ensure_OpenAIEmbeddings()
 
 _qdrant_client = None
 

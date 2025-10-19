@@ -27,12 +27,15 @@ from app.modules.lawfirmchatbot.services.conversation_state import (
     record_response,
 )
 from app.modules.lawfirmchatbot.services.document_service import render_html_document, extract_case_info
+from app.modules.lawfirmchatbot.services._lc_compat import ensure_OpenAIEmbeddings
 from app.services.LLM.config import get_llm_settings
 
 logger = logging.getLogger(__name__)
 
 # Initialize LLM config for routing
 LLM = get_llm_settings()
+
+OpenAIEmbeddings = ensure_OpenAIEmbeddings()
 
 # === DOCGEN Intent Detection ===
 DOCGEN_KEYWORDS = [

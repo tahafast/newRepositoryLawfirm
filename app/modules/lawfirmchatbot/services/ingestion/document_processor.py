@@ -1,8 +1,10 @@
 """Robust document processing service for PDF, DOCX, DOC, and TXT files."""
 
 from typing import List, Optional
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
+from app.modules.lawfirmchatbot.services._lc_compat import (
+    ensure_Document,
+    ensure_RecursiveCharacterTextSplitter,
+)
 import math
 import logging
 import os
@@ -11,6 +13,9 @@ import unicodedata
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+Document = ensure_Document()
+RecursiveCharacterTextSplitter = ensure_RecursiveCharacterTextSplitter()
 
 
 def _clean_unicode_text(text: str) -> str:
