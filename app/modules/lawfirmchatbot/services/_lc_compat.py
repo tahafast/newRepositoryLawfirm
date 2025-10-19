@@ -1,5 +1,9 @@
-# Centralized LangChain import compatibility for v0.1+
-from typing import Any
+"""
+Unified LangChain compatibility shims.
+Use these helpers instead of importing from `langchain.schema` or `langchain.text_splitter` directly.
+Works with both the old monolith and the new split packages.
+"""
+from typing import Any, Type
 
 
 def _ensure_available(name: str, obj: Any):
@@ -42,15 +46,20 @@ except Exception:
 
 
 # Public helpers
-def ensure_Document():
+def ensure_Document() -> Type[Any]:
     return _ensure_available("Document", Document)
 
 
-def ensure_RecursiveCharacterTextSplitter():
+def get_recursive_splitter(**kwargs: Any):
+    splitter_cls = ensure_RecursiveCharacterTextSplitter()
+    return splitter_cls(**kwargs)
+
+
+def ensure_RecursiveCharacterTextSplitter() -> Type[Any]:
     return _ensure_available(
         "RecursiveCharacterTextSplitter", RecursiveCharacterTextSplitter
     )
 
 
-def ensure_OpenAIEmbeddings():
+def ensure_OpenAIEmbeddings() -> Type[Any]:
     return _ensure_available("OpenAIEmbeddings", OpenAIEmbeddings)

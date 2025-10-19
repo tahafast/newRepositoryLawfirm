@@ -4,10 +4,12 @@ Provides basic document reranking functionality
 """
 
 from typing import List, Dict, Any
-from langchain.schema import Document
+from app.modules.lawfirmchatbot.services._lc_compat import ensure_Document
 import logging
 
 logger = logging.getLogger(__name__)
+
+Document = ensure_Document()
 
 
 class DocumentReranker:

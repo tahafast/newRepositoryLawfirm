@@ -3,7 +3,7 @@
 from typing import List, Optional
 from app.modules.lawfirmchatbot.services._lc_compat import (
     ensure_Document,
-    ensure_RecursiveCharacterTextSplitter,
+    get_recursive_splitter,
 )
 import math
 import logging
@@ -15,7 +15,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 Document = ensure_Document()
-RecursiveCharacterTextSplitter = ensure_RecursiveCharacterTextSplitter()
 
 
 def _clean_unicode_text(text: str) -> str:
@@ -67,7 +66,7 @@ def process_document(file_path: str, filename: str, chunk_size: int = 1000) -> L
         
         # Create text splitter with optimized chunking (900-1200 tokens ≈ 3600-4800 chars)
         # Using 4000 chars as middle ground with 480 overlap (~120 tokens)
-        text_splitter = RecursiveCharacterTextSplitter(
+        text_splitter = get_recursive_splitter(
             chunk_size=4000,  # ~1000 tokens for better context
             chunk_overlap=480,  # ~120 tokens overlap
             length_function=len,
