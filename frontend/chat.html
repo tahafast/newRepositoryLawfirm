@@ -562,13 +562,61 @@
         answerBox.className = 'assistant-card answer-content html-document';
         answerBox.innerHTML = text;
         console.log('[HTML-DOC] Rendering as HTML document');
+
+        // --- Add Copy button for docgen responses ---
+        const wrapper = document.createElement('div');
+        wrapper.className = 'html-doc-wrapper';
+        wrapper.style.position = 'relative';
+        wrapper.appendChild(answerBox);
+
+        // Create Copy button
+        const copyBtn = document.createElement('button');
+        copyBtn.textContent = 'Copy';
+        copyBtn.className = 'copy-doc-btn';
+        Object.assign(copyBtn.style, {
+          position: 'absolute',
+          top: '10px',
+          right: '16px',
+          padding: '4px 10px',
+          fontSize: '0.8rem',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          background: 'var(--brand)',
+          color: '#fff',
+          cursor: 'pointer',
+          opacity: '0.9',
+          transition: 'opacity 0.2s ease',
+          zIndex: '10'
+        });
+
+        copyBtn.onmouseenter = () => (copyBtn.style.opacity = '1');
+        copyBtn.onmouseleave = () => (copyBtn.style.opacity = '0.9');
+
+        copyBtn.addEventListener('click', async () => {
+          try {
+            const docText = answerBox.innerText || answerBox.textContent;
+            await navigator.clipboard.writeText(docText.trim());
+            copyBtn.textContent = 'Copied!';
+            copyBtn.style.background = 'var(--success, #16a34a)';
+            setTimeout(() => {
+              copyBtn.textContent = 'Copy';
+              copyBtn.style.background = 'var(--brand)';
+            }, 1500);
+          } catch (err) {
+            console.error('[COPY] Failed:', err);
+            copyBtn.textContent = 'Error';
+          }
+        });
+
+        wrapper.appendChild(copyBtn);
+        div.appendChild(wrapper);
+        console.log('[COPY-BUTTON] Added for docgen bubble');
       } else {
         // Parse as markdown for QA responses
         answerBox.innerHTML = marked.parse(text);
         console.log('[MARKDOWN] Rendering as markdown');
+        div.appendChild(answerBox);
       }
-      
-      div.appendChild(answerBox);
 
       // Add metadata
       if (referencedPages || documentName) {
@@ -593,6 +641,41 @@
     transcript.appendChild(div);
     transcript.scrollTop = transcript.scrollHeight;
   }
+
+  /* --- Copy Button Styling Enhancements --- */
+  const style = document.createElement('style');
+  style.textContent = `
+    .copy-doc-btn {
+      background: var(--brand, #2563eb);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      opacity: 0.9;
+      transition: background 0.2s ease, opacity 0.2s ease;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+      z-index: 10;
+    }
+    .copy-doc-btn:hover {
+      filter: brightness(1.05);
+      opacity: 1;
+    }
+    .assistant-card.html-document {
+      position: relative;
+      z-index: 1;
+      overflow: visible !important;
+    }
+    .html-doc-wrapper {
+      position: relative;
+    }
+    .bubble.assistant {
+      position: relative;
+      overflow: visible !important;
+    }
+  `;
+  document.head.appendChild(style);
 
   function escapeHtml(str) {
     return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -761,6 +844,58 @@
     if (treatAsHtml) {
       contentDiv.className = 'assistant-card answer-content html-document';
       contentDiv.innerHTML = fullText;
+
+      let wrapper = contentDiv.parentElement;
+      if (!wrapper || !wrapper.classList.contains('html-doc-wrapper')) {
+        wrapper = document.createElement('div');
+        wrapper.className = 'html-doc-wrapper';
+        wrapper.style.position = 'relative';
+        contentDiv.replaceWith(wrapper);
+        wrapper.appendChild(contentDiv);
+      }
+
+      let copyBtn = wrapper.querySelector('.copy-doc-btn');
+      if (!copyBtn) {
+        copyBtn = document.createElement('button');
+        copyBtn.textContent = 'Copy';
+        copyBtn.className = 'copy-doc-btn';
+        copyBtn.style.position = 'absolute';
+        copyBtn.style.top = '10px';
+        copyBtn.style.right = '16px';
+        copyBtn.style.padding = '4px 10px';
+        copyBtn.style.fontSize = '0.8rem';
+        copyBtn.style.border = '1px solid var(--border)';
+        copyBtn.style.borderRadius = '6px';
+        copyBtn.style.background = 'var(--brand)';
+        copyBtn.style.color = '#fff';
+        copyBtn.style.cursor = 'pointer';
+        copyBtn.style.opacity = '0.9';
+        copyBtn.style.transition = 'opacity 0.2s ease';
+        copyBtn.style.zIndex = '10';
+
+        copyBtn.onmouseenter = () => (copyBtn.style.opacity = '1');
+        copyBtn.onmouseleave = () => (copyBtn.style.opacity = '0.9');
+
+        copyBtn.addEventListener('click', async () => {
+          try {
+            const docText = contentDiv.innerText || contentDiv.textContent || '';
+            await navigator.clipboard.writeText(docText.trim());
+            copyBtn.textContent = 'Copied!';
+            copyBtn.style.background = 'var(--success, #16a34a)';
+            setTimeout(() => {
+              copyBtn.textContent = 'Copy';
+              copyBtn.style.background = 'var(--brand)';
+            }, 1500);
+          } catch (err) {
+            console.error('[COPY] Failed during streaming:', err);
+            copyBtn.textContent = 'Error';
+          }
+        });
+
+        wrapper.appendChild(copyBtn);
+        console.log('[COPY-BUTTON] Added during streaming');
+      }
+
       transcript.scrollTop = transcript.scrollHeight;
       console.log('[HTML-DOC] Rendered HTML document in streaming');
       return;
