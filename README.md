@@ -1,207 +1,163 @@
 # Law Firm Chatbot
 
-An advanced RAG (Retrieval-Augmented Generation) system designed specifically for legal document analysis and querying. This chatbot provides intelligent legal analysis with document upload capabilities and smart query processing.
+Law Firm Chatbot is a modern retrieval-augmented assistant that helps legal teams search firm knowledge, analyse documents, and draft professional pleadings in minutes. The project combines a FastAPI backend, a modular retrieval pipeline, and a lightweight web UI tailored for day-to-day law practice.
 
-## 🚀 Features
+## Key Features
 
-- **Document Upload**: Support for PDF, DOCX, and TXT files
-- **Legal Query Analysis**: Advanced legal keyword detection and analysis
-- **Smart Response Generation**: Context-aware responses with confidence scoring
-- **Professional Legal Analysis**: Tailored for legal terminology and concepts
-- **Interactive API Documentation**: Built-in Swagger/OpenAPI docs
-- **Health Monitoring**: Real-time server health checks
+- **Smart document ingestion** - Upload PDF, DOCX, DOC, TXT, or RTF files. Text is cleaned, chunked, and indexed in Qdrant with page-aware metadata for precise citations.
+- **Contextual legal Q&A** - Retrieve the most relevant knowledge, rerank passages, and run them through the configured LLM for grounded answers with references.
+- **Document generation (DocGen)** - Detects drafting intents (affidavit, writ, plaint, legal notice, bail petition, and more), gathers required facts, and produces polished HTML pleadings ready to copy.
+- **Conversation memory** - Stores each exchange in SQLite (or PostgreSQL/Redis if configured) so conversations resume with prior context, titles, and document state.
+- **Web experience included** - `chat.html` for the assistant, `ingest.html` for indexing, both available at `/ui/` when the API serves static assets.
+- **Operational guardrails** - Adaptive retrieval strategies, intent classification, grounding checks, and extensive logging to keep outputs reliable.
 
-## 🛠️ Technology Stack
+## Architecture Overview
 
-- **Backend**: FastAPI (Python)
-- **Server**: Uvicorn ASGI server
-- **Document Processing**: Multi-format document support
-- **API Documentation**: Swagger/OpenAPI
-- **Virtual Environment**: Python venv
+- **FastAPI service** (`app/main.py`) wires application modules, middleware, and optional static hosting.
+- **RAG orchestration** (`app/modules/lawfirmchatbot/services/rag/rag_orchestrator.py`) coordinates query analysis, retrieval, reranking, and LLM prompting.
+- **Document processing** (`services/ingestion`) extracts text with fallbacks, normalises Unicode, and assigns page numbers before vector indexing.
+- **Vector store** uses Qdrant (cloud, docker, or embedded) via the official Python client.
+- **LLM integration** leverages LangChain abstractions with provider routing (OpenAI by default) for both Q&A and document drafting models.
+- **Stateful chat memory** persists conversations through SQLAlchemy and optional Redis buffering.
 
-## 📋 Prerequisites
-
-- Python 3.8 or higher
-- pip (Python package manager)
-- Windows/macOS/Linux
-
-## ⚡ Quick Start
-
-### 1. Clone the Repository
-```bash
-git clone <repository-url>
-cd lawfirmChatbot
+```
+app/
+  main.py
+  modules/lawfirmchatbot/
+    api/                  # REST endpoints and conversation APIs
+    services/             # RAG, docgen, ingestion, memory helpers
+    schema/               # Pydantic request/response models
+core/                     # Configuration, logging, dependency wiring
+frontend/                 # Static chat and ingest single-page apps
+requirements.txt          # Python dependencies
+docker-compose.yml        # Optional Qdrant + API runtime
 ```
 
-### 2. Set Up Virtual Environment
-```bash
-# Create virtual environment
-python -m venv robi
+## Getting Started
 
-# Activate virtual environment
-# On Windows:
-.\robi\Scripts\activate.bat
-# On macOS/Linux:
-source robi/bin/activate
-```
+### 1. Prerequisites
 
-### 3. Install Dependencies
+- Python 3.10 or newer
+- Docker (optional, required if you want to run Qdrant locally via compose)
+- An API key for your chosen LLM provider (OpenAI by default)
+
+### 2. Clone and install
+
 ```bash
+git clone https://github.com/tahafast/newRepositoryLawfirm.git
+cd newRepositoryLawfirm
+python -m venv .venv
+.venv\Scripts\activate       # Windows
+# source .venv/bin/activate  # macOS/Linux
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 4. Start the Server
+### 3. Configure environment
 
-**Option 1: Using the Batch File (Windows - Recommended)**
 ```bash
-.\start_chatbot.bat
+copy env.template .env       # Windows
+# cp env.template .env       # macOS/Linux
 ```
 
-**Option 2: Using Python Directly**
+Edit `.env` (or define environment variables) with at least:
+
+- `OPENAI_API_KEY` (or relevant provider keys)
+- `QA_MODEL` / `DOCGEN_MODEL` choices
+- Qdrant connection mode (`QDRANT_MODE`, `QDRANT_URL`, `QDRANT_API_KEY` if cloud)
+- Optional: `DATABASE_URL`, `REDIS_URL`, `SERVE_FRONTEND`
+
+### 4. Start Qdrant (local option)
+
 ```bash
-python working_server.py
+docker compose up qdrant -d
 ```
 
-**Option 3: Using Uvicorn**
+You can also point `QDRANT_URL` at a managed instance or embed Qdrant by setting `QDRANT_MODE=embedded`.
+
+### 5. Launch the API
+
 ```bash
-uvicorn working_server:app --host 127.0.0.1 --port 8000 --reload
+uvicorn app.main:app --reload
 ```
 
-### 5. Access the Application
+By default the service listens on `http://127.0.0.1:8000`. When `SERVE_FRONTEND=1` (default), the static UI is available under:
 
-Once the server is running, you can access:
+- Chat UI: `http://127.0.0.1:8000/ui/chat.html`
+- Document ingestion UI: `http://127.0.0.1:8000/ui/ingest.html`
+- OpenAPI docs: `http://127.0.0.1:8000/docs`
+- Health check: `http://127.0.0.1:8000/healthz`
 
-- **Main API**: http://127.0.0.1:8000
-- **Interactive API Docs**: http://127.0.0.1:8000/docs
-- **Health Check**: http://127.0.0.1:8000/health
+### 6. Full stack with Docker Compose (optional)
 
-## 📚 API Endpoints
+To build the API container alongside Qdrant:
 
-### Core Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/` | Welcome message and API information |
-| GET | `/health` | Server health check |
-| GET | `/docs` | Interactive API documentation |
-
-### Document Management
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/upload-document` | Upload legal documents (PDF, DOCX, TXT) |
-| POST | `/api/v1/query` | Query uploaded documents with legal analysis |
-
-## 🔧 Usage Examples
-
-### Upload a Document
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/upload-document" \
-     -H "Content-Type: multipart/form-data" \
-     -F "file=@your-legal-document.pdf"
+docker compose up --build
 ```
 
-### Query the Document
-```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/query" \
-     -H "Content-Type: application/json" \
-     -d '{"query": "What are the main contractual obligations?"}'
-```
+Set your `OPENAI_API_KEY` (or other provider keys) in the environment before running the command.
 
-## 📁 Project Structure
+## Usage Highlights
 
-```
-lawfirmChatbot/
-├── app/                          # Application modules
-│   ├── modules/
-│   │   ├── lawfirmchatbot/      # Core chatbot functionality
-│   │   ├── services/            # Business logic services
-│   │   └── router.py            # API routing
-├── core/                        # Core configuration
-├── database/                    # Database configurations
-├── robi/                       # Virtual environment
-├── working_server.py           # Main server application (ACTIVE)
-├── start_chatbot.bat          # Windows startup script (ACTIVE)
-├── requirements.txt           # Python dependencies
-├── README.md                  # This file
-└── main.py                   # Alternative server entry point
-```
+1. **Index documents**
+   - Visit `/ui/ingest.html` or call `POST /api/v1/lawfirm/upload-document` with multipart form data.
+   - Supported formats: PDF, DOCX, DOC, TXT, RTF. The service normalises text and stores per-page metadata.
 
-## 🧪 Testing the API
+2. **Chat with the assistant**
+   - Open `/ui/chat.html` to start a conversation. The UI preserves conversation history, supports doc generation previews, and offers a one-click copy button for drafted pleadings.
+   - Conversations can also be managed through the REST endpoints:
+     - `POST /api/v1/lawfirm/conversations/new`
+     - `GET /api/v1/lawfirm/conversations`
+     - `GET /api/v1/lawfirm/conversations/{conversation_id}/messages`
+     - `DELETE /api/v1/lawfirm/conversations/{conversation_id}`
 
-### Using the Interactive Documentation
-1. Navigate to http://127.0.0.1:8000/docs
-2. Try the `/health` endpoint to verify the server is running
-3. Use the `/api/v1/upload-document` endpoint to upload a test document
-4. Use the `/api/v1/query` endpoint to ask questions about your document
+3. **Document generation**
+   - The system detects doc drafting intents ("generate an affidavit...") and routes the request through the DocGen manager.
+   - Gathered facts are combined with precedent snippets and rendered as HTML for instant download or copy.
 
-### Health Check
-```bash
-curl http://127.0.0.1:8000/health
-```
+## API Summary
 
-Expected response:
-```json
-{
-  "status": "healthy",
-  "server": "running",
-  "documents_uploaded": 0,
-  "ready": true
-}
-```
+| Method | Endpoint                                             | Purpose                                      |
+|--------|------------------------------------------------------|----------------------------------------------|
+| POST   | `/api/v1/lawfirm/upload-document`                    | Upload one or more documents for indexing    |
+| POST   | `/api/v1/lawfirm/query`                              | Submit a question to the RAG orchestrator    |
+| GET    | `/api/v1/lawfirm/docs/indexed/samples?document=...`  | Preview stored vector chunks by document     |
+| POST   | `/api/v1/lawfirm/conversations/new`                  | Create a new conversation                    |
+| GET    | `/api/v1/lawfirm/conversations`                      | List conversations for a user                |
+| GET    | `/api/v1/lawfirm/conversations/{id}/messages`        | Retrieve recent messages for a conversation  |
+| DELETE | `/api/v1/lawfirm/conversations/{id}`                 | Remove a conversation and its messages       |
 
-## 🔍 Legal Analysis Features
+## Configuration Reference
 
-The chatbot provides specialized legal analysis including:
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | LLM provider key used for Q&A and document drafting. |
+| `QA_MODEL`, `DOCGEN_MODEL` | Model names for retrieval answers and DocGen flows. |
+| `QDRANT_MODE` | `docker`, `cloud`, or `embedded` vector store mode. |
+| `QDRANT_URL`, `QDRANT_API_KEY` | Connection details when using Qdrant cloud or remote. |
+| `DATABASE_URL` | SQLAlchemy DSN for chat memory (SQLite by default). |
+| `REDIS_URL` | Optional Redis instance for buffer/caching. |
+| `SERVE_FRONTEND` | Serve the static SPA from FastAPI (`1` by default). |
+| `LOG_LEVEL`, `LOG_QDRANT_HTTP` | Logging verbosity controls. |
+| `WEB_SEARCH_ENABLED`, `TAVILY_API_KEY` | Toggle web fallback search support. |
 
-- **Legal Keyword Detection**: Recognizes legal terminology and concepts
-- **Query Complexity Analysis**: Determines if queries are simple or complex
-- **Confidence Scoring**: Provides reliability estimates for responses
-- **Professional Recommendations**: Suggests consulting with legal counsel when appropriate
-- **Document Context**: Maintains context of uploaded legal documents
+Refer to `env.template` for the complete list and sensible defaults.
 
-## 🚨 Troubleshooting
+## Development Notes
 
-### Server Won't Start
-1. Ensure the virtual environment is activated
-2. Check that all dependencies are installed: `pip install -r requirements.txt`
-3. Verify Python version: `python --version` (should be 3.8+)
-4. Check if port 8000 is already in use
+- Run the API with `uvicorn app.main:app --reload` for auto-reload during development.
+- Set `DEBUG_RAG=1` (alongside other logging flags) to inspect retrieval and LLM timing in detail.
+- Unit and integration tests can be run with `python -m pytest` (see `test_intelligent_routing.py` for examples).
+- The SQLite memory database (`brag_ai.sqlite`) is created automatically; delete it between sessions if you need a clean slate.
 
-### Cannot Access Server
-1. Verify the server is running (check console output)
-2. Try accessing http://127.0.0.1:8000/health first
-3. Check Windows Firewall settings
-4. Ensure no other applications are using port 8000
+## Troubleshooting
 
-### Document Upload Issues
-1. Verify file format is supported (PDF, DOCX, TXT)
-2. Check file size (large files may take longer to process)
-3. Ensure the file is not corrupted
+- **No results returned** - Confirm documents were successfully ingested and the Qdrant collection exists. Use `/api/v1/lawfirm/docs/indexed/samples` to verify stored chunks.
+- **LLM errors** - Make sure the API key is valid and the selected models are available to your account.
+- **DocGen missing fields** - The assistant may prompt for required fields; supply the requested facts in follow-up turns.
+- **Frontend not loading** - Ensure `SERVE_FRONTEND=1` or open the static files directly from the `frontend/` directory using a local server.
 
-## 🔧 Development
+## License
 
-### Adding New Features
-1. Modify `working_server.py` for API changes
-2. Update endpoints and business logic as needed
-3. Test using the interactive documentation at `/docs`
-
-### Environment Variables
-Currently, the application runs with default settings. For production deployment, consider adding environment-specific configurations.
-
-## 📝 License
-
-This project is developed for legal document analysis and professional use.
-
-## 🤝 Support
-
-For issues or questions:
-1. Check the troubleshooting section above
-2. Review the interactive API documentation at `/docs`
-3. Verify all prerequisites are met
-
----
-
-**Status**: ✅ Active and Running
-**Last Updated**: $(Get-Date -Format "yyyy-MM-dd")
-**Server**: http://127.0.0.1:8000
+This project is provided for internal use by the maintainers. Contact the repository owner for licensing or redistribution questions.
