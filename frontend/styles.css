@@ -1452,3 +1452,16 @@ button:not(:active)::after,
 .hover\:underline:hover {
   text-decoration: underline;
 }
+
+.no-underline {
+  text-decoration: none;
+  color: inherit;
+}
+
+.transition {
+  transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+.hover\:opacity-80:hover {
+  opacity: 0.8;
+}
