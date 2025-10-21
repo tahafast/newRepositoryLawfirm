@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter
 
 from core.config import settings
-from app.modules.lawfirm.services.qdrant_service import get_qdrant_client
+from app.modules.lawfirmchatbot.services.qdrant_service import get_qdrant_client
 
 router = APIRouter()
 

@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, PlainTextResponse
 from app.modules.router import router as modules_router
-from app.modules.lawfirm.api.router_indexed_docs import (
+from app.modules.lawfirmchatbot.api.router_indexed_docs import (
     router as indexed_docs_router,
 )
 from core.config import settings, wire_services, perform_warmup
