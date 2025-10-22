@@ -14,7 +14,7 @@ from core.config import get_legacy_services, Services
 # Import service functions
 from app.modules.lawfirmchatbot.services.document_service import (
     process_document_upload,
-    process_document_query
+    process_document_query,
 )
 from app.modules.lawfirmchatbot.services.vector_store import list_document_samples
 
@@ -80,6 +80,7 @@ async def upload_document(
         total_chunks=total_chunks,
         files=results,
     )
+
 
 @v1.post("/query", response_model=QueryResponse)
 async def query_document(

@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     
     # Embeddings Configuration
     EMBEDDING_MODEL: str = "text-embedding-3-small"
+    EPHEMERAL_COLLECTION_PREFIX: str = os.getenv("EPHEMERAL_COLLECTION_PREFIX", "ephemeral_docs_")
+    EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "1536"))
+    VECTOR_DISTANCE: str = os.getenv("VECTOR_DISTANCE", "Cosine")
     
     # RAG Debug Configuration
     DEBUG_RAG: bool = False  # Enable detailed RAG pipeline logging (set to True for debugging)

@@ -6,7 +6,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <title>BRAG AI — Chat</title>
+  <title>BRAG AI ΓÇö Chat</title>
   <link rel="stylesheet" href="./styles.css?v=1.1.3"/>
   <script src="./theme.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -295,6 +295,69 @@
       background: var(--sidebar);
     }
 
+    .chat-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 20px;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--sidebar);
+    }
+
+    .chat-toolbar .btn {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.2s, border 0.2s;
+    }
+
+    .chat-toolbar .btn:hover {
+      background: var(--hover);
+      border-color: var(--brand);
+    }
+
+    .chat-toolbar .btn[disabled] {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .chat-toolbar .muted {
+      color: #6b7280;
+      font-size: 0.75rem;
+    }
+
+    .ephemeral-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      background: #f1f5f9;
+      font-size: 0.75rem;
+    }
+
+    :root[data-theme="dark"] .ephemeral-chip {
+      background: #1e293b;
+      color: #cbd5f5;
+    }
+
+    .ephemeral-chip button {
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      font-size: 0.8rem;
+      color: inherit;
+    }
+
+    .ephemeral-chip button:hover {
+      opacity: 0.7;
+    }
+
     textarea {
       flex: 1;
       background: var(--panel);
@@ -413,6 +476,7 @@
   </style>
 </head>
 <body>
+  <div id="appBanner" style="display:none;padding:8px 12px;background:#ffefef;color:#900;border:1px solid #f3caca;margin:8px 16px;border-radius:6px;"></div>
   <header class="header flex items-center justify-between px-6 py-4">
     <a href="./index.html" id="brand-link" class="flex items-center space-x-3 no-underline transition hover:opacity-80">
       <div class="logo bg-blue-600 text-white font-bold rounded-full w-8 h-8 flex items-center justify-center text-lg">B</div>
@@ -433,7 +497,7 @@
   <aside class="sidebar">
     <div class="sb-head" style="border-top: 1px solid var(--border); border-bottom: none;">
       <button class="chat-btn primary" id="newChat" style="flex: 1;">+ New Chat</button>
-      <button class="chat-btn" id="refreshChats" title="Refresh conversations">↻</button>
+      <button class="chat-btn" id="refreshChats" title="Refresh conversations">Refresh</button>
     </div>
     <div class="conv-list" id="convList"></div>
   </aside>
@@ -444,6 +508,16 @@
       <h2>Chat</h2>
     </div>
     <div class="chat" id="transcript"></div>
+    <div class="chat-toolbar">
+      <button id="attachDocBtn" type="button" class="btn">📎 Attach Document</button>
+      <input
+        id="ephemeralFileInput"
+        type="file"
+        accept=".pdf,.doc,.docx,.txt"
+        style="display:none"
+      />
+      <span id="ephemeralStatus" class="muted"></span>
+    </div>
     <div class="composer">
       <textarea id="input" placeholder="Ask anything about your documents..." rows="1"></textarea>
       <button class="chat-btn primary" id="send">Send</button>
@@ -454,14 +528,241 @@
   <script type="module">
   import { API_BASE } from "./config.runtime.js?v=2025-10-13-dark-fix";
 
-  const API = API_BASE + '/api/v1/lawfirm';
+  const API_ROOT = (typeof API_BASE === 'string' && API_BASE.length) ? API_BASE : '';
+  const API = `${API_ROOT}/api/v1/lawfirm`;
   let conversationId = localStorage.getItem('conversation_id') || null;
   const userId = localStorage.getItem('user_id') || 'anon';
 
+  const banner = document.getElementById('appBanner');
   const convList = document.getElementById('convList');
   const transcript = document.getElementById('transcript');
   const input = document.getElementById('input');
   const sendBtn = document.getElementById('send');
+  const attachBtn = document.getElementById('attachDocBtn');
+  const fileInput = document.getElementById('ephemeralFileInput');
+  const attachmentStatus = document.getElementById('ephemeralStatus');
+
+  const ALLOWED_EPHEMERAL_EXTS = new Set(['pdf', 'doc', 'docx', 'txt']);
+  const MAX_EPHEMERAL_MB = 25;
+  let currentEphemeralAbortController = null;
+
+  // ---- helpers (declare BEFORE usage everywhere) ----
+  function showBanner(msg) {
+    if (!banner) return;
+    banner.textContent = msg;
+    banner.style.display = 'block';
+  }
+
+  function truncate(text, max) {
+    if (typeof text !== 'string' || !Number.isFinite(max) || max <= 0) return '';
+    if (text.length <= max) return text;
+    return text.slice(0, Math.max(0, max - 1)) + '…';
+  }
+
+  async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  attachBtn?.addEventListener('click', () => fileInput?.click());
+
+  fileInput?.addEventListener('change', async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!ALLOWED_EPHEMERAL_EXTS.has(ext)) {
+      alert('Only PDF, DOC, DOCX, or TXT files are allowed.');
+      fileInput.value = '';
+      return;
+    }
+
+    if (file.size > MAX_EPHEMERAL_MB * 1024 * 1024) {
+      alert(`File too large. Max ${MAX_EPHEMERAL_MB} MB.`);
+      fileInput.value = '';
+      return;
+    }
+
+    try {
+      if (!conversationId) {
+        await newConversation();
+      }
+      if (!conversationId) throw new Error('conversationId missing.');
+
+      if (attachmentStatus) attachmentStatus.textContent = 'Uploading…';
+      if (attachBtn) attachBtn.disabled = true;
+
+      await uploadEphemeralDoc({ file, conversationId, userId });
+      setChatHasDoc(conversationId, true);
+      renderAttachmentChip(file.name);
+      fileInput.value = '';
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err || '');
+      if (message === 'Upload aborted safely.') {
+        console.warn('[EPHEMERAL] Upload aborted before completion.');
+      } else {
+        console.error('[EPHEMERAL] Upload failed:', err);
+        alert(message || 'Failed to attach document.');
+        showBanner(message || 'Failed to attach document.');
+        if (attachmentStatus) attachmentStatus.textContent = '';
+      }
+    } finally {
+      if (attachBtn) attachBtn.disabled = false;
+    }
+  });
+
+  function renderAttachmentChip(filename) {
+    if (!attachmentStatus) return;
+    attachmentStatus.innerHTML = '';
+
+    const prefix = document.createElement('span');
+    prefix.textContent = 'Attached: ';
+    attachmentStatus.appendChild(prefix);
+
+    const chip = document.createElement('span');
+    chip.className = 'ephemeral-chip';
+    chip.title = filename;
+
+    const label = document.createElement('span');
+    label.textContent = truncateFilename(filename);
+    chip.appendChild(label);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.setAttribute('aria-label', 'Remove attachment');
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', detachEphemeralDoc);
+    chip.appendChild(removeBtn);
+
+    attachmentStatus.appendChild(chip);
+  }
+
+  function truncateFilename(name, max = 28) {
+    if (!name) return '';
+    return truncate(name, max);
+  }
+
+  async function removeEphemeralDoc(conversationId) {
+    if (!conversationId) return;
+
+    if (currentEphemeralAbortController) {
+      currentEphemeralAbortController.abort();
+      currentEphemeralAbortController = null;
+    }
+
+    const response = await fetch(`${API}/ephemeral/${conversationId}`, {
+      method: 'DELETE',
+    });
+
+    if (!response.ok && response.status !== 404) {
+      let detail = '';
+      try {
+        const errJson = await response.json();
+        detail = errJson?.detail || '';
+      } catch (err) {
+        detail = '';
+      }
+      throw new Error(detail || `Failed to remove ephemeral document (${response.status}).`);
+    }
+
+    setChatHasDoc(conversationId, false);
+    console.log('[EPHEMERAL] Previous document context removed.');
+    return response;
+  }
+
+  async function uploadEphemeralDoc({ file, conversationId, userId }) {
+    if (!conversationId) throw new Error('conversationId missing.');
+
+    await removeEphemeralDoc(conversationId);
+
+    const form = new FormData();
+    form.append('conversation_id', conversationId);
+    form.append('user_id', userId);
+    form.append('file', file);
+
+    const controller = new AbortController();
+    currentEphemeralAbortController = controller;
+    const timeoutId = setTimeout(() => controller.abort(), 75000);
+    try {
+      const response = await fetch(`${API}/ephemeral/upload`, {
+        method: 'POST',
+        body: form,
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        let errText = '';
+        try {
+          errText = await response.text();
+        } catch (err) {
+          errText = '';
+        }
+        if (errText) {
+          throw new Error(`Upload failed (${response.status}): ${errText}`);
+        }
+        throw new Error(`Upload failed (${response.status}). Check /api/v1/lawfirm/ephemeral/ping.`);
+      }
+
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        console.warn('[EPHEMERAL] Upload aborted safely.');
+        throw new Error('Upload aborted safely.');
+      }
+      throw error instanceof Error ? error : new Error(String(error));
+    } finally {
+      clearTimeout(timeoutId);
+      if (currentEphemeralAbortController === controller) {
+        currentEphemeralAbortController = null;
+      }
+    }
+  }
+
+  async function detachEphemeralDoc() {
+    if (!conversationId) return;
+    if (!confirm('Detach and delete the ephemeral document for this chat?')) return;
+
+    try {
+      if (attachmentStatus) attachmentStatus.textContent = 'Removing…';
+      if (attachBtn) attachBtn.disabled = true;
+
+      await removeEphemeralDoc(conversationId);
+
+      setChatHasDoc(conversationId, false);
+      if (attachmentStatus) {
+        attachmentStatus.textContent = 'Attachment removed.';
+        setTimeout(() => {
+          if (attachmentStatus.textContent === 'Attachment removed.') {
+            attachmentStatus.textContent = '';
+          }
+        }, 1500);
+      }
+    } catch (err) {
+      console.error('[EPHEMERAL] Detach failed:', err);
+      alert(err?.message || 'Failed to detach document.');
+      showBanner(err?.message || 'Failed to detach document.');
+      if (attachmentStatus) attachmentStatus.textContent = '';
+    } finally {
+      if (attachBtn) attachBtn.disabled = false;
+    }
+  }
+
+  (async () => {
+    try {
+      const r = await fetchWithTimeout(`${API_ROOT}/healthz`, {}, 6000);
+      if (!r.ok) {
+        showBanner(`Health check failed (${r.status}).`);
+      }
+    } catch (e) {
+      showBanner(`Cannot reach API (${e?.message || 'unknown error'}).`);
+    }
+  })();
 
   const CHAT_STATE_KEY = 'chat_state_meta';
   let chatState = {};
@@ -721,7 +1022,7 @@
         // Delete button
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'delete-chat';
-        deleteBtn.innerHTML = '🗑️';
+        deleteBtn.textContent = 'Delete';
         deleteBtn.title = 'Delete conversation';
         deleteBtn.onclick = async (e) => {
           e.stopPropagation();
@@ -934,7 +1235,7 @@
     if (!text) return "New Chat";
     const words = text.trim().replace(/\s+/g, ' ').split(' ').slice(0, 7).join(' ');
     const capped = words.charAt(0).toUpperCase() + words.slice(1);
-    return capped.length > 40 ? capped.slice(0, 37) + '…' : capped;
+    return capped.length > 40 ? capped.slice(0, 37) + 'ΓÇª' : capped;
   }
   
   function saveChatTitle(conversationId, title) {

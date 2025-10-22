@@ -32,7 +32,8 @@ langchain-text-splitters>=0.0.1
 langchain-openai>=0.1.0
 langchain-google-genai>=0.0.6
 PyPDF2>=3.0.1
-python-docx==1.1.2
+pypdf>=4.2.0     # lightweight PDF text extract (best-effort fallback)
+python-docx>=1.1.2  # DOCX extraction support
 qdrant-client>=1.8.0
 striprtf>=0.0.26
 

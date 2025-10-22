@@ -8,7 +8,7 @@ import re
 
 from app.modules.lawfirmchatbot.services.ingestion.document_processor import process_document
 from app.modules.lawfirmchatbot.services.retrieval.vector_search import add_documents_to_vector_store, search_similar_documents, normalize_hits, build_user_prompt
-from app.modules.lawfirmchatbot.services.llm import chat_completion, looks_like_citations_only, run_llm_chat
+from app.modules.lawfirmchatbot.services.llm import chat_completion, looks_like_citations_only, run_llm_chat, embed_text_async
 from app.modules.lawfirmchatbot.schema.query import QueryResponse, DebugInfo, DebugQueryAnalysis
 from app.modules.lawfirmchatbot.services.query_analyzer import QueryComplexityAnalyzer, is_docgen_request
 from app.modules.lawfirmchatbot.services.reranker import DocumentReranker
@@ -27,7 +27,11 @@ from app.modules.lawfirmchatbot.services.conversation_state import (
     record_response,
 )
 from app.modules.lawfirmchatbot.services.document_service import render_html_document, extract_case_info
-from app.modules.lawfirmchatbot.services._lc_compat import ensure_OpenAIEmbeddings
+from app.modules.lawfirmchatbot.services.ephemeral_store import (
+    collection_exists as ephemeral_collection_exists,
+    search as search_ephemeral,
+)
+from app.modules.lawfirmchatbot.services._lc_compat import ensure_OpenAIEmbeddings, ensure_Document
 from app.services.LLM.config import get_llm_settings
 
 logger = logging.getLogger(__name__)
@@ -36,6 +40,7 @@ logger = logging.getLogger(__name__)
 LLM = get_llm_settings()
 
 OpenAIEmbeddings = ensure_OpenAIEmbeddings()
+Document = ensure_Document()
 
 # === DOCGEN Intent Detection ===
 DOCGEN_KEYWORDS = [
@@ -957,13 +962,60 @@ Ask specific questions about your documents, request comparisons between concept
             # search_similar_documents now returns a tuple: (documents, unique_sources, unique_pages)
             search_result = await search_similar_documents(resolved_query, k=k, score_threshold=score_thresh)
             t_qdrant_search = time.time() - t_embed_start
-            t_embed = t_qdrant_search  # Includes embedding time
 
             if isinstance(search_result, tuple):
                 initial_chunks, _, _ = search_result
             else:
                 # Fallback for backwards compatibility
                 initial_chunks = search_result
+
+            initial_chunks = list(initial_chunks or [])
+            ephemeral_chunks: List[Document] = []
+
+            if conversation_id:
+                try:
+                    if ephemeral_collection_exists(conversation_id):
+                        eph_start = time.time()
+                        query_embedding = await embed_text_async(resolved_query)
+                        eph_hits = search_ephemeral(
+                            conversation_id=conversation_id,
+                            query_embedding=query_embedding,
+                            limit=max(4, k),
+                        )
+                        t_qdrant_search += time.time() - eph_start
+
+                        for hit in eph_hits:
+                            text = (hit.get("text") or "").strip()
+                            if not text:
+                                continue
+                            payload = hit.get("payload") or {}
+                            metadata = {
+                                "source": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
+                                "document": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
+                                "page": payload.get("page")
+                                or payload.get("page_number")
+                                or payload.get("idx"),
+                                "idx": payload.get("idx"),
+                                "conversation_id": payload.get("conversation_id"),
+                                "similarity_score": float(hit.get("score") or 0.0),
+                                "ephemeral": True,
+                            }
+                            ephemeral_chunks.append(Document(page_content=text, metadata=metadata))
+                except Exception as exc:
+                    logger.warning(
+                        "[answer_query] Ephemeral retrieval failed for conversation %s: %s",
+                        conversation_id,
+                        exc,
+                    )
+
+            if ephemeral_chunks:
+                initial_chunks.extend(ephemeral_chunks)
+                initial_chunks.sort(
+                    key=lambda ch: float(ch.metadata.get("similarity_score", 0.0)),
+                    reverse=True,
+                )
+
+            t_embed = t_qdrant_search  # Includes embedding + ephemeral search time
 
             total_hits = len(initial_chunks)
             scores = [float(ch.metadata.get("similarity_score", 0.0)) for ch in initial_chunks]

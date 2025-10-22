@@ -38,8 +38,8 @@ Dockerfile
 *.cache
 *.tmp
 *.log
+.ephemeral_store/
 
 # Check/utility scripts
 check_db.py
 scripts/
-
