@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # Embeddings Configuration
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EPHEMERAL_COLLECTION_PREFIX: str = os.getenv("EPHEMERAL_COLLECTION_PREFIX", "ephemeral_docs_")
+    EPHEMERAL_EMBED_BATCH: int = env_int("EPHEMERAL_EMBED_BATCH", 32)
+    EPHEMERAL_MAX_RETRIES: int = env_int("EPHEMERAL_MAX_RETRIES", 4)
+    EPHEMERAL_RETRY_BASE_MS: int = env_int("EPHEMERAL_RETRY_BASE_MS", 300)
+    EPHEMERAL_MAX_FILES: int = env_int("EPHEMERAL_MAX_FILES", 5)
+    EPHEMERAL_MAX_TOTAL_MB: int = env_int("EPHEMERAL_MAX_TOTAL_MB", 20)
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "1536"))
     VECTOR_DISTANCE: str = os.getenv("VECTOR_DISTANCE", "Cosine")
     

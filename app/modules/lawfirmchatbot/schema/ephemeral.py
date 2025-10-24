@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
 
+class EphemeralUploadFile(BaseModel):
+    doc_id: str
+    file_name: str
+    chunks: int
+
+
 class EphemeralUploadResponse(BaseModel):
     status: str = Field("ok")
-    chunks: int
     collection: str
+    files: List[EphemeralUploadFile] = Field(default_factory=list)
+    mode: str = Field("append")
     tokens_used: Optional[int] = None
 
 

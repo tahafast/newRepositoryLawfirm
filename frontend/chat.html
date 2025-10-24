@@ -331,6 +331,98 @@
       font-size: 0.75rem;
     }
 
+    .attachment-context-banner {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 4px 20px 0;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    #attachmentSlot {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      min-height: 18px;
+      font-size: 0.8rem;
+    }
+
+    /* --- File chip polish (bubble) --- */
+    .file-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      background: #f3f4f6;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+      font-size: 12px;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    :root[data-theme="dark"] .file-chip {
+      background: #111827;
+      color: #e5e7eb;
+      border-color: #374151;
+    }
+
+    .file-chip .clip-icon {
+      width: 14px;
+      height: 14px;
+      opacity: 0.75;
+      flex: 0 0 auto;
+    }
+
+    .file-chip .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .composer-attachment-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .composer-attachment-chip button {
+      border: none;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font-size: 0.85rem;
+      line-height: 1;
+      padding: 0 2px;
+    }
+
+    .composer-attachment-chip button:hover {
+      opacity: 0.7;
+    }
+
+    .attachment-context-banner .attachment-context-name {
+      font-weight: 600;
+    }
+
+    .attachment-context-banner button {
+      border: none;
+      background: transparent;
+      padding: 0;
+      color: var(--brand);
+      cursor: pointer;
+      font-size: 0.75rem;
+      text-decoration: underline;
+    }
+
     .ephemeral-chip {
       display: inline-flex;
       align-items: center;
@@ -344,6 +436,19 @@
     :root[data-theme="dark"] .ephemeral-chip {
       background: #1e293b;
       color: #cbd5f5;
+    }
+    .bubble-attachment-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .bubble-attachment-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
     }
 
     .ephemeral-chip button {
@@ -513,10 +618,17 @@
       <input
         id="ephemeralFileInput"
         type="file"
+        multiple
         accept=".pdf,.doc,.docx,.txt"
         style="display:none"
       />
-      <span id="ephemeralStatus" class="muted"></span>
+      <div id="attachmentSlot" class="muted"></div>
+    </div>
+    <div id="attachmentContextBanner" class="attachment-context-banner" style="display:none">
+      <span>Using attached document(s)</span>
+      <span id="attachmentContextName" class="attachment-context-name"></span>
+      <span id="attachmentContextSeparator" aria-hidden="true">-</span>
+      <button id="attachmentContextRemove" type="button">Remove</button>
     </div>
     <div class="composer">
       <textarea id="input" placeholder="Ask anything about your documents..." rows="1"></textarea>
@@ -530,6 +642,11 @@
 
   const API_ROOT = (typeof API_BASE === 'string' && API_BASE.length) ? API_BASE : '';
   const API = `${API_ROOT}/api/v1/lawfirm`;
+  const CLIP_SVG = `
+    <svg class="clip-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M21.44 11.05 12 20.5a6 6 0 1 1-8.49-8.49l9.9-9.9a4 4 0 0 1 5.66 5.66L8.46 18.38a2 2 0 1 1-2.83-2.83l8.49-8.49"/>
+    </svg>`;
   let conversationId = localStorage.getItem('conversation_id') || null;
   const userId = localStorage.getItem('user_id') || 'anon';
 
@@ -540,11 +657,29 @@
   const sendBtn = document.getElementById('send');
   const attachBtn = document.getElementById('attachDocBtn');
   const fileInput = document.getElementById('ephemeralFileInput');
-  const attachmentStatus = document.getElementById('ephemeralStatus');
+  const attachmentSlot = document.getElementById('attachmentSlot');
+  const attachmentContextBanner = document.getElementById('attachmentContextBanner');
+  const attachmentContextName = document.getElementById('attachmentContextName');
+  const attachmentContextSeparator = document.getElementById('attachmentContextSeparator');
+  const attachmentContextRemove = document.getElementById('attachmentContextRemove');
 
   const ALLOWED_EPHEMERAL_EXTS = new Set(['pdf', 'doc', 'docx', 'txt']);
   const MAX_EPHEMERAL_MB = 25;
-  let currentEphemeralAbortController = null;
+  let inflightAttachmentController = null;
+  const ATTACHMENT_CACHE_KEY = 'chat_ephemeral_attachments';
+  let attachmentCache = {};
+  try {
+    attachmentCache = JSON.parse(localStorage.getItem(ATTACHMENT_CACHE_KEY) || '{}') || {};
+  } catch (err) {
+    console.warn('[ATTACHMENTS] Failed to parse attachment cache, resetting.', err);
+    attachmentCache = {};
+  }
+  let ephemeralAttachments = [];
+  let attachmentPinnedToMessage = false;
+
+  if (attachmentContextRemove) {
+    attachmentContextRemove.addEventListener('click', detachEphemeralDoc);
+  }
 
   // ---- helpers (declare BEFORE usage everywhere) ----
   function showBanner(msg) {
@@ -556,7 +691,7 @@
   function truncate(text, max) {
     if (typeof text !== 'string' || !Number.isFinite(max) || max <= 0) return '';
     if (text.length <= max) return text;
-    return text.slice(0, Math.max(0, max - 1)) + '…';
+    return text.slice(0, Math.max(0, max - 1)) + '...';
   }
 
   async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
@@ -572,74 +707,270 @@
   attachBtn?.addEventListener('click', () => fileInput?.click());
 
   fileInput?.addEventListener('change', async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const ext = (file.name.split('.').pop() || '').toLowerCase();
-    if (!ALLOWED_EPHEMERAL_EXTS.has(ext)) {
-      alert('Only PDF, DOC, DOCX, or TXT files are allowed.');
-      fileInput.value = '';
-      return;
-    }
-
-    if (file.size > MAX_EPHEMERAL_MB * 1024 * 1024) {
-      alert(`File too large. Max ${MAX_EPHEMERAL_MB} MB.`);
-      fileInput.value = '';
-      return;
-    }
+    const files = Array.from(event.target.files || []);
+    if (!files.length) return;
 
     try {
       if (!conversationId) {
         await newConversation();
       }
-      if (!conversationId) throw new Error('conversationId missing.');
+      if (!conversationId) {
+        throw new Error('conversationId missing.');
+      }
 
-      if (attachmentStatus) attachmentStatus.textContent = 'Uploading…';
+      const validFiles = files.filter(file => {
+        const ext = (file.name.split('.').pop() || '').toLowerCase();
+        if (!ALLOWED_EPHEMERAL_EXTS.has(ext)) {
+          alert(`"${file.name}" is not an allowed file type (PDF, DOC, DOCX, TXT).`);
+          return false;
+        }
+        if (file.size > MAX_EPHEMERAL_MB * 1024 * 1024) {
+          alert(`"${file.name}" exceeds the ${MAX_EPHEMERAL_MB} MB limit.`);
+          return false;
+        }
+        return true;
+      });
+      if (!validFiles.length) {
+        fileInput.value = '';
+        return;
+      }
+
+      if (attachmentSlot) {
+        attachmentSlot.textContent = 'Uploading...';
+      }
+      hideAttachmentContextBanner();
+
+      if (inflightAttachmentController) {
+        inflightAttachmentController.abort();
+      }
+      inflightAttachmentController = new AbortController();
+
       if (attachBtn) attachBtn.disabled = true;
 
-      await uploadEphemeralDoc({ file, conversationId, userId });
-      setChatHasDoc(conversationId, true);
-      renderAttachmentChip(file.name);
-      fileInput.value = '';
+      try {
+        const staleDocIds = ephemeralAttachments.filter(att => !att.pinned && att.doc_id).map(att => att.doc_id);
+        const data = await uploadEphemeral(validFiles, { mode: 'replace', remove: staleDocIds, signal: inflightAttachmentController.signal });
+        const uploadedFiles = Array.isArray(data?.files) ? data.files : [];
+        const responseMode = typeof data?.mode === 'string' ? data.mode.toLowerCase() : 'replace';
+
+        let nextAttachments = ephemeralAttachments.slice();
+        if (responseMode === 'replace') {
+          nextAttachments = nextAttachments.filter(att => att.pinned);
+        }
+
+        for (const file of uploadedFiles) {
+          const docId = (file && file.doc_id) ? String(file.doc_id) : '';
+          if (!docId) {
+            continue;
+          }
+          const fileName = file?.file_name || file?.name || 'Document';
+          nextAttachments.push({
+            doc_id: docId,
+            name: fileName,
+            pinned: false,
+          });
+        }
+
+        ephemeralAttachments = nextAttachments;
+        attachmentPinnedToMessage = ephemeralAttachments.length > 0 && !ephemeralAttachments.some(att => !att.pinned);
+        renderAttachmentChips();
+        persistAttachments();
+        updateContextBanner();
+        syncChatHasDocState();
+      } catch (err) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+        console.error('[EPHEMERAL] Upload failed:', err);
+        const message = err instanceof Error ? err.message : String(err || '');
+        alert(message || 'Failed to attach documents.');
+        showBanner(message || 'Failed to attach documents.');
+      } finally {
+        inflightAttachmentController = null;
+        if (attachmentSlot) {
+          renderAttachmentChips();
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err || '');
-      if (message === 'Upload aborted safely.') {
-        console.warn('[EPHEMERAL] Upload aborted before completion.');
-      } else {
-        console.error('[EPHEMERAL] Upload failed:', err);
-        alert(message || 'Failed to attach document.');
-        showBanner(message || 'Failed to attach document.');
-        if (attachmentStatus) attachmentStatus.textContent = '';
-      }
+      alert(message || 'Failed to attach documents.');
+      console.error('[EPHEMERAL] Attachment workflow failed:', err);
     } finally {
       if (attachBtn) attachBtn.disabled = false;
+      if (fileInput) fileInput.value = '';
     }
   });
 
-  function renderAttachmentChip(filename) {
-    if (!attachmentStatus) return;
-    attachmentStatus.innerHTML = '';
+  function renderAttachmentChips() {
+    if (!attachmentSlot) return;
+    attachmentSlot.innerHTML = '';
 
-    const prefix = document.createElement('span');
-    prefix.textContent = 'Attached: ';
-    attachmentStatus.appendChild(prefix);
+    const pending = ephemeralAttachments.filter(att => !att.pinned);
+    if (!pending.length) {
+      return;
+    }
 
-    const chip = document.createElement('span');
-    chip.className = 'ephemeral-chip';
-    chip.title = filename;
+    for (const att of pending) {
+      const chip = document.createElement('div');
+      chip.className = 'composer-attachment-chip file-chip';
+      chip.title = att.name;
 
-    const label = document.createElement('span');
-    label.textContent = truncateFilename(filename);
-    chip.appendChild(label);
+      chip.innerHTML = `
+        ${CLIP_SVG}
+        <span class="sr-only">Attached file: </span>
+        <span class="name"></span>
+      `;
+      const nameEl = chip.querySelector('.name');
+      if (nameEl) {
+        nameEl.textContent = truncateFilename(att.name, 32);
+      }
 
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.setAttribute('aria-label', 'Remove attachment');
-    removeBtn.textContent = 'Remove';
-    removeBtn.addEventListener('click', detachEphemeralDoc);
-    chip.appendChild(removeBtn);
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.setAttribute('aria-label', `Remove ${att.name}`);
+      removeBtn.textContent = 'x';
+      removeBtn.addEventListener('click', () => removeAttachment(att));
+      chip.appendChild(removeBtn);
 
-    attachmentStatus.appendChild(chip);
+      attachmentSlot.appendChild(chip);
+    }
+  }
+
+  function clearAttachmentChip() {
+    if (!attachmentSlot) return;
+    attachmentSlot.innerHTML = '';
+  }
+
+  async function removeAttachment(att) {
+    if (!conversationId) return;
+    try {
+      const res = await fetch(
+        `/api/v1/lawfirm/ephemeral/${conversationId}/doc/${encodeURIComponent(att.doc_id)}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok && res.status !== 404) {
+        throw new Error(`Failed to remove attachment (${res.status}).`);
+      }
+    } catch (err) {
+      console.error('[EPHEMERAL] Remove attachment failed:', err);
+      alert('Failed to remove file.');
+      return;
+    }
+
+    ephemeralAttachments = ephemeralAttachments.filter(a => a.doc_id !== att.doc_id);
+    attachmentPinnedToMessage = ephemeralAttachments.length > 0 && !ephemeralAttachments.some(a => !a.pinned);
+    renderAttachmentChips();
+    persistAttachments();
+    updateContextBanner();
+    syncChatHasDocState();
+  }
+
+  function computeAttachmentSummary(includePinnedOnly = false) {
+    const source = includePinnedOnly ? ephemeralAttachments.filter(att => att.pinned) : ephemeralAttachments;
+    const total = source.length;
+    if (!total) return null;
+    if (total === 1) {
+      return source[0].name || '1 document';
+    }
+    return `${total} documents`;
+  }
+
+  function persistAttachments() {
+    if (!conversationId) return;
+    if (!ephemeralAttachments.length) {
+      delete attachmentCache[conversationId];
+    } else {
+      attachmentCache[conversationId] = ephemeralAttachments.map(att => ({
+        doc_id: att.doc_id,
+        name: att.name,
+        pinned: !!att.pinned,
+      }));
+    }
+    localStorage.setItem(ATTACHMENT_CACHE_KEY, JSON.stringify(attachmentCache));
+  }
+
+  function loadAttachmentsFromCache(id) {
+    if (!id) return [];
+    const stored = attachmentCache[id];
+    if (!Array.isArray(stored)) return [];
+    return stored.map(att => ({
+      doc_id: att.doc_id,
+      name: att.name,
+      pinned: !!att.pinned,
+    }));
+  }
+
+  function updateContextBanner() {
+    if (!attachmentContextBanner) return;
+    const pinnedCount = ephemeralAttachments.filter(att => att.pinned).length;
+    if (!ephemeralAttachments.length || pinnedCount === 0) {
+      hideAttachmentContextBanner();
+      return;
+    }
+    const summary = computeAttachmentSummary(true);
+    if (!summary) {
+      hideAttachmentContextBanner();
+      return;
+    }
+    showAttachmentContextBanner(summary);
+  }
+
+  function syncChatHasDocState(fallbackSummary) {
+    if (!conversationId) return;
+    const summary = computeAttachmentSummary() || fallbackSummary || null;
+    const hasDoc = !!summary;
+    const allPinned = hasDoc && !ephemeralAttachments.some(att => !att.pinned);
+    setChatHasDoc(conversationId, hasDoc, summary || null, allPinned);
+  }
+
+  function showAttachmentContextBanner(name) {
+    if (!attachmentContextBanner) return;
+    const hasName = !!(name && typeof name === 'string' && name.trim());
+    if (attachmentContextName) {
+      if (hasName) {
+        attachmentContextName.textContent = ` - ${truncateFilename(name, 36)}`;
+        attachmentContextName.style.display = 'inline';
+      } else {
+        attachmentContextName.textContent = '';
+        attachmentContextName.style.display = 'none';
+      }
+    }
+    if (attachmentContextSeparator) {
+      attachmentContextSeparator.style.display = hasName ? 'inline' : 'none';
+    }
+    attachmentContextBanner.style.display = 'flex';
+  }
+
+  function hideAttachmentContextBanner() {
+    if (!attachmentContextBanner) return;
+    attachmentContextBanner.style.display = 'none';
+    if (attachmentContextName) {
+      attachmentContextName.textContent = '';
+      attachmentContextName.style.display = 'none';
+    }
+    if (attachmentContextSeparator) {
+      attachmentContextSeparator.style.display = 'none';
+    }
+  }
+
+  function syncAttachmentComposerWithStoredState() {
+    if (!conversationId) {
+      attachmentPinnedToMessage = false;
+      ephemeralAttachments = [];
+      hideAttachmentContextBanner();
+      clearAttachmentChip();
+      return;
+    }
+    ephemeralAttachments = loadAttachmentsFromCache(conversationId);
+    attachmentPinnedToMessage = ephemeralAttachments.length > 0 && !ephemeralAttachments.some(att => !att.pinned);
+    if (attachmentPinnedToMessage) {
+      clearAttachmentChip();
+      updateContextBanner();
+    } else {
+      renderAttachmentChips();
+      hideAttachmentContextBanner();
+    }
+    syncChatHasDocState();
   }
 
   function truncateFilename(name, max = 28) {
@@ -650,9 +981,9 @@
   async function removeEphemeralDoc(conversationId) {
     if (!conversationId) return;
 
-    if (currentEphemeralAbortController) {
-      currentEphemeralAbortController.abort();
-      currentEphemeralAbortController = null;
+    if (inflightAttachmentController) {
+      inflightAttachmentController.abort();
+      inflightAttachmentController = null;
     }
 
     const response = await fetch(`${API}/ephemeral/${conversationId}`, {
@@ -670,23 +1001,42 @@
       throw new Error(detail || `Failed to remove ephemeral document (${response.status}).`);
     }
 
-    setChatHasDoc(conversationId, false);
+    setChatHasDoc(conversationId, false, null, false);
     console.log('[EPHEMERAL] Previous document context removed.');
     return response;
   }
 
-  async function uploadEphemeralDoc({ file, conversationId, userId }) {
+  async function uploadEphemeral(files, { mode = 'append', remove = [], signal } = {}) {
     if (!conversationId) throw new Error('conversationId missing.');
-
-    await removeEphemeralDoc(conversationId);
+    if (!Array.isArray(files) || !files.length) {
+      throw new Error('No files provided.');
+    }
 
     const form = new FormData();
     form.append('conversation_id', conversationId);
     form.append('user_id', userId);
-    form.append('file', file);
+    form.append('mode', mode);
+    for (const file of files) {
+      form.append('files', file, file.name);
+    }
+    if (Array.isArray(remove)) {
+      for (const docId of remove) {
+        if (docId) {
+          form.append('remove_doc_ids', docId);
+        }
+      }
+    }
 
     const controller = new AbortController();
-    currentEphemeralAbortController = controller;
+    const handleExternalAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) {
+        controller.abort();
+      } else {
+        signal.addEventListener('abort', handleExternalAbort);
+      }
+    }
+
     const timeoutId = setTimeout(() => controller.abort(), 75000);
     try {
       const response = await fetch(`${API}/ephemeral/upload`, {
@@ -708,18 +1058,16 @@
         throw new Error(`Upload failed (${response.status}). Check /api/v1/lawfirm/ephemeral/ping.`);
       }
 
-      const data = await response.json();
-      return data;
+      return await response.json();
     } catch (error) {
-      if (error.name === 'AbortError') {
-        console.warn('[EPHEMERAL] Upload aborted safely.');
-        throw new Error('Upload aborted safely.');
+      if (error?.name === 'AbortError') {
+        throw error;
       }
       throw error instanceof Error ? error : new Error(String(error));
     } finally {
       clearTimeout(timeoutId);
-      if (currentEphemeralAbortController === controller) {
-        currentEphemeralAbortController = null;
+      if (signal && !signal.aborted) {
+        signal.removeEventListener('abort', handleExternalAbort);
       }
     }
   }
@@ -729,17 +1077,21 @@
     if (!confirm('Detach and delete the ephemeral document for this chat?')) return;
 
     try {
-      if (attachmentStatus) attachmentStatus.textContent = 'Removing…';
+      if (attachmentSlot) attachmentSlot.textContent = 'Removing...';
       if (attachBtn) attachBtn.disabled = true;
 
       await removeEphemeralDoc(conversationId);
-
-      setChatHasDoc(conversationId, false);
-      if (attachmentStatus) {
-        attachmentStatus.textContent = 'Attachment removed.';
+      ephemeralAttachments = [];
+      attachmentPinnedToMessage = false;
+      hideAttachmentContextBanner();
+      clearAttachmentChip();
+      persistAttachments();
+      syncChatHasDocState();
+      if (attachmentSlot) {
+        attachmentSlot.textContent = 'Attachments removed.';
         setTimeout(() => {
-          if (attachmentStatus.textContent === 'Attachment removed.') {
-            attachmentStatus.textContent = '';
+          if (attachmentSlot.textContent === 'Attachments removed.') {
+            attachmentSlot.textContent = '';
           }
         }, 1500);
       }
@@ -747,7 +1099,7 @@
       console.error('[EPHEMERAL] Detach failed:', err);
       alert(err?.message || 'Failed to detach document.');
       showBanner(err?.message || 'Failed to detach document.');
-      if (attachmentStatus) attachmentStatus.textContent = '';
+      if (attachmentSlot) attachmentSlot.textContent = '';
     } finally {
       if (attachBtn) attachBtn.disabled = false;
     }
@@ -781,9 +1133,33 @@
     return !!(chatState[id] && chatState[id].hasDoc);
   }
 
-  function setChatHasDoc(id, value) {
+  function getChatDocName(id) {
+    if (!id || !chatState[id]) return null;
+    const name = chatState[id].docName;
+    if (typeof name !== 'string') return null;
+    const trimmed = name.trim();
+    return trimmed ? trimmed : null;
+  }
+
+  function setChatHasDoc(id, value, docName, docPinned) {
     if (!id) return;
-    chatState[id] = { ...(chatState[id] || {}), hasDoc: !!value };
+    const next = { ...(chatState[id] || {}), hasDoc: !!value };
+    if (!next.hasDoc) {
+      delete next.docName;
+      delete next.docPinned;
+    } else {
+      if (docName !== undefined) {
+        if (docName === null || (typeof docName === 'string' && docName.trim() === '')) {
+          delete next.docName;
+        } else {
+          next.docName = docName;
+        }
+      }
+      if (docPinned !== undefined) {
+        next.docPinned = !!docPinned;
+      }
+    }
+    chatState[id] = next;
     localStorage.setItem(CHAT_STATE_KEY, JSON.stringify(chatState));
   }
 
@@ -791,6 +1167,10 @@
     if (!id || !chatState[id]) return;
     delete chatState[id];
     localStorage.setItem(CHAT_STATE_KEY, JSON.stringify(chatState));
+    if (attachmentCache[id]) {
+      delete attachmentCache[id];
+      localStorage.setItem(ATTACHMENT_CACHE_KEY, JSON.stringify(attachmentCache));
+    }
   }
 
   function ensureChatSubject(id, userInput) {
@@ -847,7 +1227,7 @@
   function bubble(role, text, isMarkdown = false, referencedPages = null, documentName = null, responseType = null) {
     const div = document.createElement('div');
     div.className = 'bubble ' + (role === 'user' ? 'user' : 'assistant');
-    
+
     const roleLabel = document.createElement('strong');
     roleLabel.textContent = role;
     div.appendChild(roleLabel);
@@ -855,22 +1235,18 @@
     if (role === 'assistant' && isMarkdown) {
       const answerBox = document.createElement('div');
       answerBox.className = 'assistant-card answer-content';
-      
-      // Check if content is HTML (doc-gen output) or Markdown (QA output)
+
       const treatAsHtml = responseType === 'html' || isHtmlContent(text);
       if (treatAsHtml) {
-        // Render HTML directly for document generation
         answerBox.className = 'assistant-card answer-content html-document';
         answerBox.innerHTML = text;
         console.log('[HTML-DOC] Rendering as HTML document');
 
-        // --- Add Copy button for docgen responses ---
         const wrapper = document.createElement('div');
         wrapper.className = 'html-doc-wrapper';
         wrapper.style.position = 'relative';
         wrapper.appendChild(answerBox);
 
-        // Create Copy button
         const copyBtn = document.createElement('button');
         copyBtn.textContent = 'Copy';
         copyBtn.className = 'copy-doc-btn';
@@ -913,30 +1289,57 @@
         div.appendChild(wrapper);
         console.log('[COPY-BUTTON] Added for docgen bubble');
       } else {
-        // Parse as markdown for QA responses
         answerBox.innerHTML = marked.parse(text);
         console.log('[MARKDOWN] Rendering as markdown');
         div.appendChild(answerBox);
       }
 
-      // Add metadata
       if (referencedPages || documentName) {
         const metaDiv = document.createElement('div');
         metaDiv.className = 'meta-row';
-            const rows = [];
+        const rows = [];
         if (referencedPages && referencedPages.length > 0) {
           rows.push(`Reference pages: ${referencedPages.join(', ')}`);
         }
         if (documentName) {
-          rows.push(`Document: ${documentName}`);
+          const names = Array.isArray(documentName) ? documentName : [documentName];
+          if (names.length) {
+            rows.push(`Document${names.length > 1 ? 's' : ''}: ${names.join(', ')}`);
+          }
         }
         metaDiv.textContent = rows.join(' | ');
-            div.appendChild(metaDiv);
-          }
-        } else {
+        div.appendChild(metaDiv);
+      }
+    } else {
       const content = document.createElement('div');
       content.textContent = text;
       div.appendChild(content);
+
+      if (role === 'user' && documentName) {
+        const names = Array.isArray(documentName) ? documentName : [documentName];
+        if (names.length) {
+          const wrap = document.createElement('div');
+          wrap.className = 'bubble-attachment-container';
+          for (const name of names) {
+            const chip = document.createElement('div');
+            chip.className = 'bubble-attachment-chip file-chip';
+            chip.title = name;
+
+            chip.innerHTML = `
+              ${CLIP_SVG}
+              <span class="sr-only">Attached file: </span>
+              <span class="name"></span>
+            `;
+            const nameEl = chip.querySelector('.name');
+            if (nameEl) {
+              nameEl.textContent = truncateFilename(name, 36);
+            }
+
+            wrap.appendChild(chip);
+          }
+          div.appendChild(wrap);
+        }
+      }
     }
 
     transcript.appendChild(div);
@@ -1052,12 +1455,17 @@
         method: 'DELETE'
       });
       clearChatState(convId);
+      if (attachmentCache[convId]) {
+        delete attachmentCache[convId];
+        localStorage.setItem(ATTACHMENT_CACHE_KEY, JSON.stringify(attachmentCache));
+      }
       
       // If we deleted the current conversation, clear it
       if (convId === conversationId) {
         conversationId = null;
         localStorage.removeItem('conversation_id');
         transcript.innerHTML = '';
+        syncAttachmentComposerWithStoredState();
         
         // Load first available conversation or create new one
         const r = await fetch(`${API}/conversations?user_id=${encodeURIComponent(userId)}`);
@@ -1089,8 +1497,9 @@
       const data = await r.json();
       conversationId = data.conversation_id;
       localStorage.setItem('conversation_id', conversationId);
-      setChatHasDoc(conversationId, false);
+      setChatHasDoc(conversationId, false, null, false);
       transcript.innerHTML = '';
+      syncAttachmentComposerWithStoredState();
       await listConversations();
     } catch (e) {
       console.error('Failed to create conversation:', e);
@@ -1107,18 +1516,23 @@
       const r = await fetch(`${API}/conversations/${conversationId}/messages`);
       const data = await r.json();
       transcript.innerHTML = '';
+      syncAttachmentComposerWithStoredState();
       data.forEach(m => {
         // Check if message has markdown metadata (for assistant messages)
         const isMarkdown = m.role === 'assistant';
         const respType = (m?.metadata && m.metadata.response_type) || m?.response_type || null;
         const hasDocMeta = m?.metadata && Object.prototype.hasOwnProperty.call(m.metadata, 'has_doc') ? m.metadata.has_doc : undefined;
+        const docNameFromMessage = m?.metadata?.document || null;
         if (typeof hasDocMeta === 'boolean') {
-          setChatHasDoc(conversationId, hasDocMeta);
+          setChatHasDoc(conversationId, hasDocMeta, hasDocMeta ? (docNameFromMessage ?? undefined) : null);
         } else if (respType === 'html') {
-          setChatHasDoc(conversationId, true);
+          setChatHasDoc(conversationId, true, docNameFromMessage ?? undefined);
+        } else if (docNameFromMessage) {
+          setChatHasDoc(conversationId, true, docNameFromMessage);
         }
         bubble(m.role, m.content, isMarkdown, null, null, respType);
       });
+      syncAttachmentComposerWithStoredState();
     } catch (e) {
       console.error('Failed to load messages:', e);
     }
@@ -1287,9 +1701,23 @@
       }
     }
 
-    bubble('user', text);
+    const pendingAttachments = ephemeralAttachments.filter(att => !att.pinned);
+    const pendingNames = pendingAttachments.map(att => att.name);
+
+    bubble('user', text, false, null, pendingNames);
     input.value = '';
     sendBtn.disabled = true;
+
+    if (pendingAttachments.length) {
+      for (const att of pendingAttachments) {
+        att.pinned = true;
+      }
+      attachmentPinnedToMessage = ephemeralAttachments.length > 0 && !ephemeralAttachments.some(att => !att.pinned);
+      renderAttachmentChips();
+      persistAttachments();
+      updateContextBanner();
+      syncChatHasDocState();
+    }
 
     if (!conversationId) await newConversation();
 
@@ -1340,17 +1768,27 @@
       
       const responseType = data?.metadata?.response_type || null;
       const hasDocMeta = data?.metadata?.has_doc;
+      const docNameFromMetadata = data?.metadata?.document || null;
       if (typeof hasDocMeta === 'boolean') {
-        setChatHasDoc(conversationId, hasDocMeta);
-      } else if (responseType === 'html') {
-        setChatHasDoc(conversationId, true);
+        if (!hasDocMeta && ephemeralAttachments.length) {
+          ephemeralAttachments = [];
+          attachmentPinnedToMessage = false;
+          renderAttachmentChips();
+          persistAttachments();
+          hideAttachmentContextBanner();
+        } else if (hasDocMeta && attachmentPinnedToMessage) {
+          updateContextBanner();
+        }
+      } else if ((responseType === 'html' || docNameFromMetadata) && attachmentPinnedToMessage) {
+        updateContextBanner();
       }
+      syncChatHasDocState(docNameFromMetadata || null);
       await streamResponse(assistantDiv, content, responseType);
       ensureChatSubject(conversationId, text);
       
       // Add metadata after streaming
       const pages = data?.metadata?.referenced_pages;
-      const doc = data?.metadata?.document;
+      const doc = docNameFromMetadata;
       const docType = data?.metadata?.doc_type;
       const references = Array.isArray(data?.metadata?.references) ? data.metadata.references.filter(Boolean) : [];
       
@@ -1424,3 +1862,5 @@
   
 </body>
 </html>
+
+

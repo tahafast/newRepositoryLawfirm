@@ -332,3 +332,176 @@ async def warmup():
         client.search(collection_name=settings.QDRANT_COLLECTION, query_vector=[0.0]*settings.EMBED_MODEL_DIM, limit=1)
     except Exception:
         pass
+
+
+# === Attachment-Scope-Aware Vector Search ===
+from typing import Literal
+
+Scope = Literal["ephemeral_only", "hybrid"]
+
+
+class VectorSearch:
+    """
+    Unified vector search interface that respects attachment scope.
+    Prevents KB pollution when users reference specific attached documents.
+    """
+    
+    def __init__(self, qdrant_client, cfg):
+        """
+        Initialize with existing Qdrant client and config.
+        
+        Args:
+            qdrant_client: Existing Qdrant client instance
+            cfg: Configuration object with QDRANT_COLLECTION attribute
+        """
+        self.qdrant = qdrant_client
+        self.cfg = cfg
+        # Memory guard: do not create duplicate collections
+        # (assumes collections already exist or are created elsewhere)
+        self.kb_collection = getattr(cfg, "QDRANT_COLLECTION", "law_docs_v1")
+        self.ephemeral_collection = "ephemeral_docs"
+    
+    async def _search_ephemeral(
+        self, 
+        query: str, 
+        conversation_id: str, 
+        limit: int, 
+        filter_file_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Search ephemeral documents for a specific conversation.
+        
+        Args:
+            query: Search query text
+            conversation_id: Conversation identifier
+            limit: Maximum results to return
+            filter_file_ids: Optional list of file IDs to filter on
+            
+        Returns:
+            List of search results with text, source, score, metadata
+        """
+        try:
+            # Generate embedding for query
+            vec = await embed_text_async(query)
+            
+            # Search ephemeral collection
+            from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+            
+            # Build filter conditions
+            conditions = [
+                FieldCondition(
+                    key="conversation_id",
+                    match=MatchValue(value=conversation_id)
+                )
+            ]
+            
+            if filter_file_ids:
+                conditions.append(
+                    FieldCondition(
+                        key="file_id",
+                        match=MatchAny(any=filter_file_ids)
+                    )
+                )
+            
+            search_result = self.qdrant.search(
+                collection_name=self.ephemeral_collection,
+                query_vector=vec,
+                query_filter=Filter(must=conditions),
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+            
+            # Normalize results to standard format
+            return normalize_hits(search_result)
+            
+        except Exception as e:
+            logger.error(f"Error searching ephemeral collection: {e}", exc_info=True)
+            return []
+    
+    async def _search_main(self, query: str, limit: int) -> List[Dict[str, Any]]:
+        """
+        Search main knowledge base collection.
+        
+        Args:
+            query: Search query text
+            limit: Maximum results to return
+            
+        Returns:
+            List of search results with text, source, score, metadata
+        """
+        try:
+            # Generate embedding for query
+            vec = await embed_text_async(query)
+            
+            # Search main KB collection
+            search_result = self.qdrant.search(
+                collection_name=self.kb_collection,
+                query_vector=vec,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+            
+            # Normalize results to standard format
+            return normalize_hits(search_result)
+            
+        except Exception as e:
+            logger.error(f"Error searching main KB collection: {e}", exc_info=True)
+            return []
+    
+    async def search(
+        self,
+        *,
+        query: str,
+        conversation_id: str,
+        scope: Scope,
+        limit_ephemeral: int,
+        limit_main: int,
+        filter_file_ids: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Unified search that respects attachment scope.
+        
+        Args:
+            query: Search query text
+            conversation_id: Conversation identifier
+            scope: "ephemeral_only" or "hybrid"
+            limit_ephemeral: Max results from ephemeral collection
+            limit_main: Max results from main KB collection
+            filter_file_ids: Optional file IDs to filter ephemeral search
+            
+        Returns:
+            List of ranked results. If scope == 'ephemeral_only', only ephemeral hits.
+            If 'hybrid', ephemeral hits first, followed by main KB hits.
+        """
+        logger.info(
+            f"[vector-search] scope={scope} "
+            f"limit_eph={limit_ephemeral} limit_main={limit_main} "
+            f"filter_files={filter_file_ids}"
+        )
+        
+        # Always search ephemeral first (for this conversation)
+        eph = await self._search_ephemeral(
+            query, 
+            conversation_id, 
+            limit_ephemeral, 
+            filter_file_ids
+        )
+        
+        logger.info(f"[vector-search] Found {len(eph)} ephemeral results")
+        
+        # If scope is ephemeral_only, return only ephemeral results
+        if scope == "ephemeral_only":
+            logger.info(f"[vector-search] Returning ephemeral-only results (no KB)")
+            return eph
+        
+        # Hybrid mode: also search main KB
+        main = await self._search_main(query, limit_main)
+        logger.info(f"[vector-search] Found {len(main)} main KB results")
+        
+        # Simple merge: ephemeral first (higher priority), then main KB
+        combined = eph + main
+        logger.info(f"[vector-search] Returning {len(combined)} total results (hybrid)")
+        
+        return combined

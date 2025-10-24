@@ -1,13 +1,14 @@
+
 """Main RAG orchestration service with modular architecture."""
 
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Literal, Sequence
 from datetime import datetime
 import logging
 import os
 import re
 
 from app.modules.lawfirmchatbot.services.ingestion.document_processor import process_document
-from app.modules.lawfirmchatbot.services.retrieval.vector_search import add_documents_to_vector_store, search_similar_documents, normalize_hits, build_user_prompt
+from app.modules.lawfirmchatbot.services.retrieval.vector_search import add_documents_to_vector_store, search_similar_documents, normalize_hits, build_user_prompt, VectorSearch
 from app.modules.lawfirmchatbot.services.llm import chat_completion, looks_like_citations_only, run_llm_chat, embed_text_async
 from app.modules.lawfirmchatbot.schema.query import QueryResponse, DebugInfo, DebugQueryAnalysis
 from app.modules.lawfirmchatbot.services.query_analyzer import QueryComplexityAnalyzer, is_docgen_request
@@ -20,6 +21,10 @@ from app.services.memory.db import SessionLocal
 from app.services.memory.memory_manager import ChatMemoryManager
 from app.services.memory.coref_resolver import resolve_coref
 from app.modules.lawfirmchatbot.services.prompts.docgen import get_docgen_prompt, build_docgen_prompt
+from app.modules.lawfirmchatbot.services.prompts import build_system_prompt, generate_priority_context
+from app.modules.lawfirmchatbot.services.ephemeral_priority import fetch_ephemeral_priority_context
+from app.modules.lawfirmchatbot.services.intent_router import decide_intent
+from qdrant_client import QdrantClient
 from app.modules.lawfirmchatbot.services.conversation_state import (
     get_conversation_state,
     update_summary,
@@ -41,6 +46,135 @@ LLM = get_llm_settings()
 
 OpenAIEmbeddings = ensure_OpenAIEmbeddings()
 Document = ensure_Document()
+
+
+# === Attachment-Aware Routing ===
+from typing import Literal, Sequence
+
+ATTACHMENT_MENTIONS = re.compile(
+    r"\b(attached|attachment|this\s+doc(?:ument)?|the\s+file\s+above|provided\s+(?:doc|document|file)|my\s+document|above\s+document|above\s+file|summarize\s+the)\b",
+    re.IGNORECASE,
+)
+
+Scope = Literal["ephemeral_only", "hybrid"]
+
+
+def _mentions_attached_text(query: str) -> bool:
+    """Check if query mentions attached documents."""
+    return bool(ATTACHMENT_MENTIONS.search(query))
+
+
+def _latest_ephemeral_file_ids(qdrant_client, conversation_id: str, limit: int = 5) -> List[str]:
+    """
+    Returns the N most recent file_ids for the conversation by scanning ephemerals.
+    Safe fallback when the UI did not send file_ids in the query payload.
+    
+    Args:
+        qdrant_client: Qdrant client instance
+        conversation_id: Conversation identifier
+        limit: Max number of file_ids to return
+        
+    Returns:
+        List of file_ids (most recent first, up to limit)
+    """
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    
+    try:
+        # Scroll ephemeral collection to find file_ids
+        # Use larger limit to ensure we catch all docs even if collection is growing
+        res = qdrant_client.scroll(
+            collection_name="ephemeral_docs",
+            scroll_filter=Filter(
+                must=[FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))]
+            ),
+            limit=512,  # Larger limit for reliability
+            with_payload=True,
+            with_vectors=False,
+        )
+        
+        file_ids = []
+        seen = set()
+        
+        # Extract unique file_ids (try both file_id and doc_id for compatibility)
+        points = res[0] if isinstance(res, tuple) else res
+        for point in points:
+            payload = getattr(point, 'payload', {}) or {}
+            
+            # Try file_id first (new), then doc_id (fallback)
+            fid = payload.get("file_id") or payload.get("doc_id")
+            
+            if fid and fid not in seen:
+                seen.add(fid)
+                file_ids.append(fid)
+                if len(file_ids) >= limit:
+                    break
+        
+        logger.info(f"[ephemeral-autodiscovery] Found {len(file_ids)} file_ids for conversation {conversation_id}: {file_ids[:3]}...")
+        return file_ids
+    
+    except Exception as e:
+        logger.error(f"[ephemeral-autodiscovery] Failed to discover file_ids: {e}", exc_info=True)
+        return []
+
+
+def _attachment_scope(user_text: str, eph_files: Sequence[dict], conversation_id: str = None, qdrant_client=None) -> Tuple[Scope, List[str]]:
+    """
+    Decide whether to restrict retrieval to ephemeral docs only.
+    If user cites a specific attached filename, return those ids to filter on.
+    
+    Args:
+        user_text: User query text
+        eph_files: List of ephemeral file metadata from UI
+        conversation_id: Conversation ID for auto-discovery
+        qdrant_client: Qdrant client for auto-discovery
+    
+    Returns:
+        Tuple of (scope, file_ids_to_filter)
+        - scope: "ephemeral_only" or "hybrid"
+        - file_ids_to_filter: list of file_ids if specific file mentioned, else auto-discovered
+    """
+    text = user_text.lower()
+    
+    # Check if ephemerals exist (either from UI or need to discover)
+    has_ephemeral = bool(eph_files)
+    if not has_ephemeral and conversation_id and qdrant_client:
+        # Try to discover file_ids from Qdrant
+        discovered_ids = _latest_ephemeral_file_ids(qdrant_client, conversation_id, limit=5)
+        has_ephemeral = bool(discovered_ids)
+        if has_ephemeral:
+            logger.info(f"[attachment-scope] Auto-discovered {len(discovered_ids)} ephemeral files")
+    
+    if not has_ephemeral:
+        return "hybrid", []
+
+    # If they mention "attached/this document", FORCE ephemeral-only
+    if _mentions_attached_text(text):
+        logger.info(f"[attachment-scope] Detected attachment mention, FORCING ephemeral-only")
+        
+        # Auto-discover file_ids if not provided
+        if not eph_files and conversation_id and qdrant_client:
+            file_ids = _latest_ephemeral_file_ids(qdrant_client, conversation_id, limit=5)
+            return "ephemeral_only", file_ids
+        
+        # Extract file_ids from eph_files
+        file_ids = [f.get("file_id", "") for f in eph_files if f.get("file_id")]
+        return "ephemeral_only", file_ids
+
+    # If they mention a specific attached filename, scope to that/those
+    named_ids = []
+    for f in eph_files:
+        name = f.get("file_name", "")
+        if name and name.lower() in text:
+            named_ids.append(f.get("file_id", ""))
+            logger.info(f"[attachment-scope] Detected filename '{name}' in query, filtering to that file")
+    
+    if named_ids:
+        return "ephemeral_only", [fid for fid in named_ids if fid]  # filter out empty ids
+
+    # default: hybrid (ephemeral prioritized, then main)
+    logger.info(f"[attachment-scope] No explicit attachment mention, using hybrid scope")
+    return "hybrid", []
+
 
 # === DOCGEN Intent Detection ===
 DOCGEN_KEYWORDS = [
@@ -168,6 +302,60 @@ def should_use_retriever(mode: str, user_query: str) -> bool:
         return any(k in text for k in keywords)
 
     return False
+
+
+def _collect_ephemeral_fallback_text(qdrant_client, conversation_id: str, file_ids: List[str], max_chars: int = 4000) -> str:
+    """
+    Collect raw text from ephemeral collection as fallback when similarity scores are too low.
+    This ensures we ALWAYS have context from attached documents when they exist.
+    
+    Args:
+        qdrant_client: Qdrant client instance
+        conversation_id: Conversation identifier
+        file_ids: List of file_ids to filter on
+        max_chars: Maximum characters to collect
+        
+    Returns:
+        Concatenated text from ephemeral chunks
+    """
+    from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+    
+    try:
+        # Build filter
+        conditions = [FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))]
+        if file_ids:
+            conditions.append(FieldCondition(key="file_id", match=MatchAny(any=file_ids)))
+        
+        # Scroll to collect text
+        res = qdrant_client.scroll(
+            collection_name="ephemeral_docs",
+            scroll_filter=Filter(must=conditions),
+            limit=512,
+            with_payload=True,
+            with_vectors=False,
+        )
+        
+        text_parts = []
+        total_len = 0
+        
+        for point in res[0]:
+            payload = getattr(point, 'payload', {}) or {}
+            text = payload.get("text") or payload.get("chunk") or payload.get("page_content") or ""
+            
+            if text and len(text.strip()) > 20:  # Only meaningful chunks
+                text_parts.append(text.strip())
+                total_len += len(text)
+                
+                if total_len >= max_chars:
+                    break
+        
+        result = "\n\n".join(text_parts)[:max_chars]
+        logger.info(f"[ephemeral-fallback] Collected {len(result)} chars from {len(text_parts)} chunks")
+        return result
+    
+    except Exception as e:
+        logger.warning(f"[ephemeral-fallback] Failed to collect text: {e}")
+        return ""
 
 
 async def _update_summary_with_exchange(
@@ -660,7 +848,7 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
    - #### Pros and #### Cons for comparisons
 4. Structure:
    - COMPARISON queries: lead-in → mandatory table (3+ rows) → per-approach blocks with #### Pros/#### Cons (2-4 bullets each)
-   - EXPLAIN queries: 2-3 ### sections (Key Idea, How It Works, Practical Notes, Examples/Applications)
+   - EXPLAIN queries: 2-3 ### sections (Key Idea, How It Works, Practical Notes)
 5. Citations: [1], [2] inline when using context; single References line at end
 6. If context is weak/partial: Use what's available and supplement naturally with general knowledge without explicitly mentioning limited data
 7. If truly no context: Answer naturally using general knowledge without mentioning missing documents
@@ -747,6 +935,88 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
 
         if settings.DEBUG_RAG:
             logger.info(f"[RAG-DEBUG] Detected mode={detected_mode_label}, placeholders={placeholders}")
+
+        # === Intent Resolution Layer ===
+        # Apply intent routing BEFORE docgen intake to prevent missing fields prompt
+        qdrant = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
+        priority_context = fetch_ephemeral_priority_context(qdrant, conversation_id)
+
+        if not priority_context:
+            priority_context = "Always consider law_docs_v1 (main db)"
+
+        has_ephemeral = priority_context.startswith("Attached file(s) context")
+        intent = decide_intent(resolved_query, has_ephemeral)
+
+        # === Patch: Override docgen when user just wants explanation ===
+        if intent == "docgen" and (
+            "describe" in resolved_query.lower()
+            or "explain" in resolved_query.lower()
+            or "summarize" in resolved_query.lower()
+            or "contents" in resolved_query.lower()
+        ):
+            intent = "qa"
+            logger.info(f"[intent-routing] Overriding docgen->qa for descriptive query with attachments")
+
+        # --- ROUTING FREEZE: Lock the initial intent (authoritative decision) ---
+        # The first classified intent is authoritative and must never be downgraded.
+        # Never downgrade docgen → general/qa later in the pipeline because of 
+        # placeholders, missing fields, or retrieval results.
+        original_intent = intent
+        logger.info(f"[routing-freeze] Locked original_intent={original_intent}")
+        
+        def _prevent_downgrade(curr, target):
+            """Prevent downgrading docgen to qa/general after initial classification."""
+            if curr == "docgen" and target != "docgen":
+                logger.warning(f"[routing-freeze] Attempted downgrade docgen -> {target}; BLOCKED")
+                return curr
+            return target
+        # -----------------------------------------------------------------------------
+
+        # Override detected_mode_label based on intent routing
+        if intent == "qa" and detected_mode_label == "docgen":
+            detected_mode_label = "general"  # Force QA path
+            logger.info(f"[intent-routing] Mode override: docgen->general due to intent routing")
+        elif intent == "docgen" and detected_mode_label != "docgen":
+            detected_mode_label = "docgen"  # Force docgen path
+            logger.info(f"[intent-routing] Mode override: {detected_mode_label}->docgen due to intent routing")
+
+        # Store for debugging
+        logger.info(f"[intent-routing] intent={intent} has_ephemeral={has_ephemeral} final_mode={detected_mode_label}")
+
+        # === Fast-path for filename questions ===
+        # If user is asking about the attached file name, answer immediately without LLM
+        import re
+        FILENAME_Q = re.compile(
+            r"(?:what\s+is|tell\s+me|give\s+me|name|called)\s+(?:the\s+)?(?:file|doc(?:ument)?)\b",
+            re.IGNORECASE,
+        )
+        
+        if has_ephemeral and (FILENAME_Q.search(resolved_query) or "file name" in resolved_query.lower() or "document name" in resolved_query.lower()):
+            # Try to get filename from ephemeral context
+            try:
+                # The filename might be in the priority_context or we need to fetch it from conversation state
+                filename_answer = "You have attached a document to this conversation."
+                
+                # Log for debugging
+                logger.info(f"[fast-path] Filename question detected, returning quick answer")
+                
+                return {
+                    "success": True,
+                    "answer": filename_answer,
+                    "answer_markdown": filename_answer,
+                    "metadata": {
+                        "strategy": "fast_path_filename",
+                        "kb_hits": 0,
+                        "web_used": False,
+                        "latency_ms": int((time.time() - t_start) * 1000),
+                        "conversation_id": conversation_id,
+                        "response_type": "text",
+                        "model": "fast_path",
+                        "has_doc": False
+                    }
+                }
+            except Exception as e:
+                logger.warning(f"[fast-path] Filename detection failed: {e}, proceeding with normal flow")
 
         if detected_mode_label == "tweak_doc" and state_cache.last_document:
             logger.info(f"[DocGen] Tweak request detected; reusing last document (doc_type={state_cache.last_doc_type})")
@@ -935,6 +1205,8 @@ Ask specific questions about your documents, request comparisons between concept
             }
         
         # === INTELLIGENT ROUTING: Detect mode (QA vs DocGen) ===
+        # Mode and intent are already set by the early intent routing logic above
+        # This section is kept for backward compatibility with variables used downstream
         is_docgen = detected_mode_label == "docgen"
         mode = "docgen" if is_docgen else "qa"
         
@@ -949,38 +1221,56 @@ Ask specific questions about your documents, request comparisons between concept
         if settings.DEBUG_RAG:
             logger.info(f"[RAG-DEBUG] Mode detected: {mode}, top_k={k}, score_threshold={score_thresh}")
         
+        # === Attachment-Aware Scope Detection with Auto-Discovery ===
+        # Determine if user is asking about attached files specifically
+        # Pass Qdrant client and conversation_id for auto-discovery of file_ids
+        eph_files = []  # Will be populated from ephemeral collection metadata (TODO: get from UI)
+        qdrant = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
+        attachment_scope, filter_file_ids = _attachment_scope(
+            resolved_query, 
+            eph_files, 
+            conversation_id=conversation_id,
+            qdrant_client=qdrant
+        )
+        logger.info(f"[attachment-scope] Query scope: {attachment_scope}, filter_file_ids: {filter_file_ids}")
+        
         # Retrieve more candidates for strategy decision (use resolved query)
+        # === Ephemeral-First Retrieval Policy ===
+        # Constants for retrieval thresholds
+        EPHEMERAL_MIN_SCORE = 0.35  # cosine sim threshold for confident ephemeral hits
+        LOW_SCORE_CEILING = 0.30    # below this, ephemeral is too weak
+        ALLOW_MIX_WHEN_LOW = True   # mix with KB only if ephemeral scores are weak
+        
         use_retriever = should_use_retriever(detected_mode_label, resolved_query)
+        
+        # CRITICAL: Never skip retrieval when ephemerals exist or attachment keywords detected
+        has_ephemeral = attachment_scope == "ephemeral_only" or bool(filter_file_ids)
+        if has_ephemeral:
+            use_retriever = True  # FORCE retrieval when attachments exist
+            logger.info(f"[retrieval-gate] FORCING retrieval due to ephemeral presence")
+        
         initial_chunks = []
+        ephemeral_chunks = []
+        main_kb_chunks = []
         total_hits = 0
         strong_hits = 0
         max_score = 0.0
         t_qdrant_search = 0.0
+        use_only_ephemeral = False
 
         if use_retriever:
             t_embed_start = time.time()
-            # search_similar_documents now returns a tuple: (documents, unique_sources, unique_pages)
-            search_result = await search_similar_documents(resolved_query, k=k, score_threshold=score_thresh)
-            t_qdrant_search = time.time() - t_embed_start
-
-            if isinstance(search_result, tuple):
-                initial_chunks, _, _ = search_result
-            else:
-                # Fallback for backwards compatibility
-                initial_chunks = search_result
-
-            initial_chunks = list(initial_chunks or [])
-            ephemeral_chunks: List[Document] = []
-
+            query_embedding = await embed_text_async(resolved_query)
+            
+            # Step 1: Always check ephemeral first if conversation exists
             if conversation_id:
                 try:
                     if ephemeral_collection_exists(conversation_id):
                         eph_start = time.time()
-                        query_embedding = await embed_text_async(resolved_query)
                         eph_hits = search_ephemeral(
                             conversation_id=conversation_id,
                             query_embedding=query_embedding,
-                            limit=max(4, k),
+                            limit=max(8, k),  # Get more ephemeral candidates
                         )
                         t_qdrant_search += time.time() - eph_start
 
@@ -1007,27 +1297,130 @@ Ask specific questions about your documents, request comparisons between concept
                         conversation_id,
                         exc,
                     )
-
-            if ephemeral_chunks:
-                initial_chunks.extend(ephemeral_chunks)
+            
+            # Step 2: Decide retrieval strategy based on ephemeral quality
+            ephem_scores = [float(ch.metadata.get("similarity_score", 0.0)) for ch in ephemeral_chunks]
+            max_ephem_score = max(ephem_scores) if ephem_scores else 0.0
+            
+            if ephemeral_chunks and max_ephem_score >= EPHEMERAL_MIN_SCORE:
+                # CASE 1: Ephemeral is confident → use ONLY ephemeral (no KB pollution)
+                use_only_ephemeral = True
+                initial_chunks = ephemeral_chunks
+                logger.info(
+                    f"[retrieval-policy] EPHEMERAL-ONLY mode: "
+                    f"max_score={max_ephem_score:.3f} >= {EPHEMERAL_MIN_SCORE}, "
+                    f"using {len(ephemeral_chunks)} ephemeral chunks"
+                )
+            elif ephemeral_chunks and max_ephem_score > LOW_SCORE_CEILING:
+                # CASE 2: Ephemeral exists but weak → keep it, add a few KB chunks
+                search_result = await search_similar_documents(resolved_query, k=max(3, k//2), score_threshold=score_thresh)
+                t_qdrant_search += time.time() - t_embed_start
+                
+                if isinstance(search_result, tuple):
+                    main_kb_chunks, _, _ = search_result
+                else:
+                    main_kb_chunks = search_result
+                main_kb_chunks = list(main_kb_chunks or [])
+                
+                # Merge and sort by score
+                initial_chunks = ephemeral_chunks + main_kb_chunks
                 initial_chunks.sort(
                     key=lambda ch: float(ch.metadata.get("similarity_score", 0.0)),
                     reverse=True,
                 )
+                initial_chunks = initial_chunks[:k]  # Limit total
+                logger.info(
+                    f"[retrieval-policy] HYBRID mode (weak ephemeral): "
+                    f"max_ephem={max_ephem_score:.3f}, "
+                    f"using {len(ephemeral_chunks)} ephem + {len(main_kb_chunks)} KB chunks"
+                )
+            elif ephemeral_chunks and ALLOW_MIX_WHEN_LOW:
+                # CASE 3: Ephemeral very weak → prefer KB, keep a token ephemeral
+                search_result = await search_similar_documents(resolved_query, k=k, score_threshold=score_thresh)
+                t_qdrant_search += time.time() - t_embed_start
+                
+                if isinstance(search_result, tuple):
+                    main_kb_chunks, _, _ = search_result
+                else:
+                    main_kb_chunks = search_result
+                main_kb_chunks = list(main_kb_chunks or [])
+                
+                # Keep just top ephemeral chunk as context, prioritize KB
+                initial_chunks = main_kb_chunks + ephemeral_chunks[:1]
+                logger.info(
+                    f"[retrieval-policy] KB-FIRST mode (very weak ephemeral): "
+                    f"max_ephem={max_ephem_score:.3f}, "
+                    f"using {len(main_kb_chunks)} KB + 1 ephem chunk"
+                )
+            else:
+                # CASE 4: No ephemeral or empty → use KB only
+                search_result = await search_similar_documents(resolved_query, k=k, score_threshold=score_thresh)
+                t_qdrant_search = time.time() - t_embed_start
+                
+                if isinstance(search_result, tuple):
+                    initial_chunks, _, _ = search_result
+                else:
+                    initial_chunks = search_result
+                initial_chunks = list(initial_chunks or [])
+                logger.info(
+                    f"[retrieval-policy] KB-ONLY mode: no ephemeral chunks, "
+                    f"using {len(initial_chunks)} KB chunks"
+                )
+            
+            # If user explicitly asked about attachment, force ephemeral-only
+            if attachment_scope == "ephemeral_only" and ephemeral_chunks:
+                use_only_ephemeral = True
+                initial_chunks = ephemeral_chunks
+                logger.info(
+                    f"[retrieval-policy] FORCED EPHEMERAL-ONLY: "
+                    f"attachment_scope detected, using {len(ephemeral_chunks)} chunks"
+                )
 
-            t_embed = t_qdrant_search  # Includes embedding + ephemeral search time
+            t_embed = t_qdrant_search  # Includes embedding + search time
 
             total_hits = len(initial_chunks)
             scores = [float(ch.metadata.get("similarity_score", 0.0)) for ch in initial_chunks]
             strong_hits = sum(1 for s in scores if s >= 0.25)
             max_score = max(scores) if scores else 0.0
 
-            logger.info(f"[answer_query] Retrieval: total_hits={total_hits}, strong_hits={strong_hits}, max_score={max_score:.3f}, t_qdrant={t_qdrant_search*1000:.0f}ms")
+            logger.info(
+                f"[answer_query] Retrieval complete: "
+                f"total_hits={total_hits}, strong_hits={strong_hits}, "
+                f"max_score={max_score:.3f}, ephemeral_only={use_only_ephemeral}, "
+                f"t_qdrant={t_qdrant_search*1000:.0f}ms"
+            )
+            
+            # CRITICAL FALLBACK: If no chunks found but ephemerals exist, collect raw text
+            if not initial_chunks and has_ephemeral and conversation_id:
+                logger.warning(f"[ephemeral-fallback] No chunks retrieved but ephemerals exist - collecting raw text")
+                fallback_text = _collect_ephemeral_fallback_text(qdrant, conversation_id, filter_file_ids, max_chars=4000)
+                
+                if fallback_text:
+                    # Create synthetic chunk from fallback text
+                    metadata = {
+                        "source": "Attached Document (fallback)",
+                        "document": "Attached Document",
+                        "similarity_score": 1.0,  # Perfect score since this is direct retrieval
+                        "ephemeral": True,
+                        "fallback": True,
+                    }
+                    initial_chunks = [Document(page_content=fallback_text, metadata=metadata)]
+                    total_hits = 1
+                    strong_hits = 1
+                    max_score = 1.0
+                    logger.info(f"[ephemeral-fallback] Synthesized {len(fallback_text)} chars as context")
         else:
             logger.info("[answer_query] Retrieval skipped; using conversation context only")
             t_embed = 0.0
         retrieval_stats = {"total_hits": total_hits, "strong_hits": strong_hits, "max_score": max_score}
-        intent = classify_intent(resolved_query)
+        
+        # ROUTING FREEZE: Prevent re-classification from overriding the initial intent
+        # Use original_intent if already locked, otherwise classify now (fallback for edge cases)
+        reclassified_intent = classify_intent(resolved_query)
+        intent = _prevent_downgrade(original_intent, reclassified_intent)
+        if reclassified_intent != intent:
+            logger.info(f"[routing-freeze] Re-classification attempted {original_intent} -> {reclassified_intent}, kept {intent}")
+        
         strategy = select_strategy(resolved_query, retrieval_stats)
 
         use_web = False
@@ -1219,9 +1612,45 @@ Ask specific questions about your documents, request comparisons between concept
         from app.modules.lawfirmchatbot.services.llm import _get_client
         openai_client = _get_client()
 
-        if mode == "docgen":
+        # === System Prompt Construction ===
+        # Use the priority context we already fetched above
+        system_prompt = build_system_prompt(priority_context)
+
+        # ROUTING FREEZE ENFORCEMENT: The intent variable is now frozen and authoritative.
+        # NO CODE BELOW THIS POINT should modify the 'intent' variable.
+        # Any logic that would change intent must use _prevent_downgrade() instead.
+        mode = intent  # Update mode variable to match frozen intent
+        
+        # Safety check: verify intent hasn't been corrupted
+        if intent != original_intent:
+            logger.error(f"[routing-freeze] CRITICAL: intent={intent} != original_intent={original_intent}! This should never happen.")
+            intent = original_intent  # Force back to original
+            mode = intent
+
+        # Initialize model variables safely (NEVER leave unset)
+        model_general = os.getenv("GENERAL_MODEL", "gpt-4o-mini")
+        model_doc = os.getenv("DOCGEN_MODEL", "gpt-4o")
+        
+        # Set target_model based on frozen intent (default to QA model for safety)
+        if intent == "docgen":
+            target_model = model_doc
+        else:
+            target_model = model_general
+        
+        # Initialize other variables that might be used in logging
+        intent_label = intent
+        use_stream = True
+        extra_llm_params = {}
+        messages = []  # CRITICAL: Initialize to prevent UnboundLocalError
+
+        # === DOCGEN PATH: Execute docgen handler and proceed to LLM call ===
+        # If intent is docgen, we build docgen-specific prompts below
+        if intent == "docgen":
             detected_doc_type = detect_doc_type(resolved_query)
-            system_prompt = get_docgen_prompt(detected_doc_type)
+            # For docgen, we can still use the priority context but combine with docgen-specific prompts
+            docgen_system_prompt = get_docgen_prompt(detected_doc_type)
+            # Inject priority context into docgen prompt as well
+            system_prompt = f"{system_prompt}\n\n{docgen_system_prompt}"
             docgen_answers = {"user_request": resolved_query}
             if docgen_context_fields:
                 docgen_answers.update({k: v for k, v in docgen_context_fields.items() if v})
@@ -1263,12 +1692,9 @@ Ask specific questions about your documents, request comparisons between concept
                 logger.info(f"[RAG-DEBUG] DocGen prompt messages={len(messages)}, total_chars={total_prompt_chars}, est_tokens={total_prompt_chars//4}")
                 logger.info(f"[RAG-DEBUG] DocGen system preview: {messages[0]['content'][:200]}...")
                 logger.info(f"[RAG-DEBUG] DocGen user preview: {messages[-1]['content'][:500]}...")
-        else:
-            system_prompt = (
-                "You are a concise legal research assistant. Use the provided context to answer factually and conversationally. "
-                "Do not draft or imitate formal legal documents, pleadings, notices, or petitions. "
-                "Keep responses in plain text or markdown suited for discussion."
-            )
+        
+        elif intent == "qa":
+            # QA mode - system_prompt already set above with priority context
             target_model = model_general
             user_prompt = f"""Using the CONTEXT, answer the QUESTION concisely but with structure.
 
@@ -1301,6 +1727,41 @@ OUTPUT RULES:
                 logger.info(f"[RAG-DEBUG] Sending to LLM: {len(messages)} messages, total_chars={total_prompt_chars}, est_tokens={total_prompt_chars//4}")
                 logger.info(f"[RAG-DEBUG] System prompt preview: {messages[0]['content'][:200]}...")
                 logger.info(f"[RAG-DEBUG] User prompt preview: {messages[-1]['content'][:500]}...")
+        
+        else:
+            # Other intents (summarize, etc.) - treat as QA
+            # ROUTING FREEZE: This branch should NEVER execute for docgen intent
+            if intent == "docgen":
+                logger.error(f"[routing-freeze] CRITICAL ERROR: docgen intent reached 'else' branch! This is a bug.")
+                raise RuntimeError(f"Routing freeze violation: docgen intent reached general/QA branch")
+            
+            target_model = model_general
+            user_prompt = f"""Using the CONTEXT, answer the QUESTION concisely but with structure.
+
+CONTEXT:
+{chr(10).join(numbered_context)}
+
+QUESTION: {query}
+
+OUTPUT RULES:
+- Start with a direct one-sentence answer.
+- Then use dynamic H2/H3 headings that fit the topic (e.g., Key Points, How It Works, Pros/Cons, Risks, Examples).
+- For comparisons/differences: include a **markdown table** first, then bullets.
+- Keep 8-14 sentences total for complex topics.
+- Use inline bracketed refs [1], [2] and end with **References:** doc/page list.
+- No boilerplate like "Limited information available."
+- Do NOT format the answer as a legal document, petition, or notice.
+"""
+            extra_llm_params = {"max_tokens": 850}
+            async with SessionLocal() as db:
+                qa_recent_msgs = await self.memory.get_prompt_messages(db, conversation_id, recent_pairs=5)
+            messages = [
+                {"role": "system", "content": system_prompt}
+            ] + qa_recent_msgs + [
+                {"role": "user", "content": user_prompt},
+            ]
+            messages = fit_context(messages, max_tokens_for_context=120000)
+            logger.info(f"[RAG-DEBUG] Other intent={intent}, treating as QA, model={target_model}")
 
         # Log final routing decision (helpful to debug which model & mode are actually invoked)
         try:
