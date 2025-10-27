@@ -1272,14 +1272,22 @@ Ask specific questions about your documents, request comparisons between concept
             conversation_id=conversation_id,
             qdrant_client=qdrant,
         )
+        attachment_reason = f"router:{attachment_scope}"
         if mentions_attached and has_ephemeral_docs:
             attachment_scope = "ephemeral_only"
             filter_file_ids = discovered_file_ids or filter_file_ids
+            attachment_reason = "attachment mention"
             logger.info("[attachment-scope] Attachment mention detected; forcing ephemeral-only scope")
         elif not filter_file_ids and has_ephemeral_docs:
             filter_file_ids = discovered_file_ids
+            attachment_reason = "auto-discovered ephemerals"
 
-        logger.info(f"[attachment-scope] Query scope: {attachment_scope}, filter_file_ids: {filter_file_ids}")
+        logger.info(
+            "[attachment-scope] Query scope: %s (reason=%s), filter_file_ids: %s",
+            attachment_scope,
+            attachment_reason,
+            filter_file_ids,
+        )
         
         # Retrieve more candidates for strategy decision (use resolved query)
         # === Ephemeral-First Retrieval Policy ===
@@ -1308,7 +1316,8 @@ Ask specific questions about your documents, request comparisons between concept
         if use_retriever:
             t_embed_start = time.time()
             query_embedding = await embed_text_async(resolved_query)
-            
+            t_qdrant_search += time.time() - t_embed_start
+
             # Step 1: Always check ephemeral first if conversation exists
             if conversation_id:
                 try:
@@ -1350,45 +1359,74 @@ Ask specific questions about your documents, request comparisons between concept
                         exc,
                     )
             
-            # Step 2: Enforce dynamic ephemeral priority
-            if ephemeral_chunks:
-                use_only_ephemeral = True
-                initial_chunks = ephemeral_chunks
+            # Step 2: Blend ephemeral context with KB while respecting intent
+            ephemeral_hits = len(ephemeral_chunks)
+            if ephemeral_hits:
                 has_ephemeral = True
-                logger.info(
-                    "[retrieval-policy] Ephemeral priority active - using %d ephemeral chunks and skipping main KB",
-                    len(ephemeral_chunks),
-                )
-            else:
-                if not has_ephemeral:
-                    search_result = await search_similar_documents(
-                        resolved_query,
-                        k=k,
-                        score_threshold=score_thresh,
-                    )
-                    t_qdrant_search = time.time() - t_embed_start
 
-                    if isinstance(search_result, tuple):
-                        initial_chunks, _, _ = search_result
-                    else:
-                        initial_chunks = search_result
-                    initial_chunks = list(initial_chunks or [])
+            kb_chunks = []
+            should_fetch_kb = True
+            if attachment_scope == "ephemeral_only" and intent != "docgen" and ephemeral_hits > 0:
+                should_fetch_kb = False
+
+            if should_fetch_kb:
+                kb_k = k
+                if k and ephemeral_hits:
+                    kb_k = max(1, k - min(ephemeral_hits, max(0, k - 1)))
+                kb_start = time.time()
+                search_result = await search_similar_documents(
+                    resolved_query,
+                    k=kb_k,
+                    score_threshold=score_thresh,
+                )
+                t_qdrant_search += time.time() - kb_start
+
+                if isinstance(search_result, tuple):
+                    kb_chunks, _, _ = search_result
+                else:
+                    kb_chunks = search_result
+                kb_chunks = list(kb_chunks or [])
+
+                if intent == "docgen":
                     logger.info(
-                        "[retrieval-policy] No ephemeral items available - falling back to main KB (%d chunks)",
-                        len(initial_chunks),
+                        "[retrieval-policy] DocGen enforced KB backfill (ephemeral_hits=%d, kb_chunks=%d)",
+                        ephemeral_hits,
+                        len(kb_chunks),
+                    )
+                elif not ephemeral_hits:
+                    logger.info(
+                        "[retrieval-policy] No ephemeral hits - using KB only (%d chunks)",
+                        len(kb_chunks),
                     )
                 else:
-                    initial_chunks = []
-                    logger.warning(
-                        "[retrieval-policy] Ephemeral metadata detected but no readable chunks - skipping main KB"
+                    logger.info(
+                        "[retrieval-policy] Ephemeral hits with KB backfill (kb_chunks=%d)",
+                        len(kb_chunks),
                     )
+            else:
+                logger.info(
+                    "[retrieval-policy] Attachment scope staying ephemeral-only (hits=%d)",
+                    ephemeral_hits,
+                )
 
-            if attachment_scope == "ephemeral_only" and not use_only_ephemeral:
+            initial_chunks = []
+            if ephemeral_hits:
+                initial_chunks.extend(ephemeral_chunks)
+            if should_fetch_kb and kb_chunks:
+                initial_chunks.extend(kb_chunks)
+
+            use_only_ephemeral = bool(ephemeral_hits) and (not should_fetch_kb or not kb_chunks)
+
+            if attachment_scope == "ephemeral_only" and not use_only_ephemeral and intent != "docgen":
                 use_only_ephemeral = True
-                initial_chunks = ephemeral_chunks
+                initial_chunks = list(ephemeral_chunks)
                 logger.info(
                     "[retrieval-policy] Attachment scope forced ephemeral-only mode even without hits"
                 )
+
+            if not initial_chunks and intent == "docgen" and should_fetch_kb:
+                logger.warning("[retrieval-policy] DocGen retrieval empty after KB backfill attempt")
+
             t_embed = t_qdrant_search  # Includes embedding + search time
 
             total_hits = len(initial_chunks)

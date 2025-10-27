@@ -4,7 +4,12 @@ from typing import Literal
 Intent = Literal["qa", "docgen"]
 
 _DOCGEN_TRIGGERS = re.compile(
-    r"\b(draft|compose|generate|prepare|write|format|create)\b", re.I
+    r"\b("
+    r"draft|compose|generate|prepare|write|format|create|template|skeleton|"
+    r"notice|suit|plaint|petition|application|reply|rejoinder|affidavit|"
+    r"bail|legal\s+notice"
+    r")\b",
+    re.I,
 )
 _ATTACHMENT_REFERENCES = re.compile(
     r"\b(attached|attachment|this\s+document|the\s+document|this\s+file|the\s+file|above\s+file)\b",

@@ -636,3 +636,8 @@ class VectorSearch:
         logger.info(f"[vector-search] Returning {len(combined)} total results (hybrid)")
         
         return combined
+
+    @staticmethod
+    def empty(hits: Optional[Sequence[Dict[str, Any]]]) -> bool:
+        """Return True when the provided hits collection is empty or None."""
+        return not hits
