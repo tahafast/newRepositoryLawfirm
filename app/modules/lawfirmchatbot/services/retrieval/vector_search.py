@@ -13,6 +13,7 @@ Document = ensure_Document()
 from app.modules.lawfirmchatbot.services.vector_store import get_qdrant, search_similar, upsert_embeddings
 from app.modules.lawfirmchatbot.services.text_cleaner import CLEAN_PIPELINE_VERSION
 from app.modules.lawfirmchatbot.services.llm import embed_text_async
+from app.modules.lawfirmchatbot.services.qdrant_collections import get_ephemeral_collection
 from core.config import settings
 from core.utils.perf import profile_stage
 
@@ -373,7 +374,7 @@ class VectorSearch:
         # Memory guard: do not create duplicate collections
         # (assumes collections already exist or are created elsewhere)
         self.kb_collection = getattr(cfg, "QDRANT_COLLECTION", "law_docs_v1")
-        self.ephemeral_collection = "ephemeral_docs"
+        self.ephemeral_collection = get_ephemeral_collection()
     
     async def _search_ephemeral(
         self, 

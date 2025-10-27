@@ -32,6 +32,7 @@ from app.modules.lawfirmchatbot.services.conversation_state import (
     update_last_document,
     record_response,
 )
+from app.modules.lawfirmchatbot.services.qdrant_collections import get_ephemeral_collection
 from app.modules.lawfirmchatbot.services.document_service import render_html_document, extract_case_info
 from app.modules.lawfirmchatbot.services.ephemeral_store import (
     collection_exists as ephemeral_collection_exists,
@@ -47,6 +48,7 @@ LLM = get_llm_settings()
 
 OpenAIEmbeddings = ensure_OpenAIEmbeddings()
 Document = ensure_Document()
+EPHEMERAL_COLLECTION = get_ephemeral_collection()
 
 
 # === Attachment-Aware Routing ===
@@ -84,7 +86,7 @@ def _latest_ephemeral_file_ids(qdrant_client, conversation_id: str, limit: int =
         # Scroll ephemeral collection to find file_ids
         # Use larger limit to ensure we catch all docs even if collection is growing
         res = qdrant_client.scroll(
-            collection_name="ephemeral_docs",
+            collection_name=EPHEMERAL_COLLECTION,
             scroll_filter=Filter(
                 must=[FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))]
             ),
@@ -356,7 +358,7 @@ def _collect_ephemeral_fallback_text(qdrant_client, conversation_id: str, file_i
         
         # Scroll to collect text
         res = qdrant_client.scroll(
-            collection_name="ephemeral_docs",
+            collection_name=EPHEMERAL_COLLECTION,
             scroll_filter=Filter(must=conditions),
             limit=512,
             with_payload=True,

@@ -26,7 +26,7 @@ services:
         value: law_docs_v1
       - key: QDRANT_COLLECTION_ALIAS
         value: law_docs_current
-      - key: EPHEMERAL_COLLECTION_PREFIX
+      - key: EPHEMERAL_COLLECTION_NAME
         value: ephemeral_docs
       - key: EMBEDDING_DIM
         value: "1536"

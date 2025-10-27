@@ -12,16 +12,13 @@ from qdrant_client.http import models as qmodels
 from core.config import settings
 from app.modules.lawfirmchatbot.services.llm import embed_text
 from app.modules.lawfirmchatbot.services.text_cleaner import CLEAN_PIPELINE_VERSION
+from app.modules.lawfirmchatbot.services.qdrant_collections import get_ephemeral_collection
 
 try:  # Prefer a pre-wired Qdrant client if available
     from app.core.qdrant import qdrant_client  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     qdrant_client = None  # type: ignore
 
-_RAW_EPHEMERAL_COLLECTION = os.getenv("EPHEMERAL_COLLECTION_PREFIX", "ephemeral_docs_shared")
-EPHEMERAL_COLLECTION_NAME = (
-    _RAW_EPHEMERAL_COLLECTION.strip().rstrip("_") or "ephemeral_docs"
-)
 VECTOR_SIZE = settings.EMBEDDING_DIM  # keep in sync with embedder output
 DISTANCE = settings.VECTOR_DISTANCE or "Cosine"
 
@@ -79,7 +76,7 @@ def _client() -> QdrantClient:
 
 def ephemeral_collection_name(_: str | None = None) -> str:
     """Return the shared ephemeral collection name."""
-    return EPHEMERAL_COLLECTION_NAME
+    return get_ephemeral_collection()
 
 
 def _conversation_filter(conversation_id: str) -> qmodels.Filter:

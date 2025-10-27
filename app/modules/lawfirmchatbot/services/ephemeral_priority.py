@@ -1,9 +1,12 @@
-import os
 from typing import Optional, List
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
-EPHEMERAL_COLLECTION = os.getenv("EPHEMERAL_COLLECTION_NAME", "ephemeral_docs")  # use your final name
+import os
+
+from app.modules.lawfirmchatbot.services.qdrant_collections import get_ephemeral_collection
+
+EPHEMERAL_COLLECTION = get_ephemeral_collection()
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1536"))
 
 
