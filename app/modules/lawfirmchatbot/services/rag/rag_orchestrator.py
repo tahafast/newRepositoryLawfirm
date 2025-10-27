@@ -237,6 +237,26 @@ SKELETON_KEYWORDS = [
     "skeleton", "format", "template", "placeholders", "placeholder", "sketch", "skeleton of", "format of"
 ]
 
+PLACEHOLDER_NEGATIONS = [
+    "don't use placeholders",
+    "do not use placeholders",
+    "don't use placeholder",
+    "do not use placeholder",
+    "without placeholders",
+    "no placeholders",
+    "no placeholder",
+    "avoid placeholders",
+    "avoid using placeholders",
+]
+
+
+def disallows_placeholders(user_query: str) -> bool:
+    """Return True when the user explicitly instructs us not to use placeholders."""
+    if not user_query:
+        return False
+    text = (user_query or "").lower()
+    return any(phrase in text for phrase in PLACEHOLDER_NEGATIONS)
+
 
 def detect_placeholders(user_query: str, state_cache=None) -> bool:
     """
@@ -247,6 +267,9 @@ def detect_placeholders(user_query: str, state_cache=None) -> bool:
     if not user_query:
         return False
     text = (user_query or "").lower()
+
+    if disallows_placeholders(text):
+        return False
 
     # explicit keywords
     for kw in SKELETON_KEYWORDS:
@@ -965,9 +988,12 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
 
         # Detect if user explicitly asked for skeleton/template/placeholders mode
         placeholders = detect_placeholders(resolved_query, state_cache)
+        disallow_placeholders = disallows_placeholders(resolved_query)
+        if disallow_placeholders:
+            placeholders = False
 
         if settings.DEBUG_RAG:
-            logger.info(f"[RAG-DEBUG] Detected mode={detected_mode_label}, placeholders={placeholders}")
+            logger.info(f"[RAG-DEBUG] Detected mode={detected_mode_label}, placeholders={placeholders}, disallow_placeholders={disallow_placeholders}")
 
         # === Intent Resolution Layer ===
         # Apply intent routing BEFORE docgen intake to prevent missing fields prompt
@@ -1179,40 +1205,53 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
                     docgen_context_fields[key] = value
 
             state_cache.doc_fields = docgen_context_fields
-            filled_count = sum(1 for v in docgen_context_fields.values() if v)
+            missing_fields = [k for k, v in docgen_context_fields.items() if not v]
 
-            # If user asked for placeholders/skeleton/template => proceed even if fields < threshold
-            if filled_count < 3 and not placeholders:
-                missing_fields = [k for k, v in docgen_context_fields.items() if not v]
-                missing_list = ", ".join(field.replace("_", " ") for field in missing_fields) or "additional case details"
-                ask_text = f"To draft your document, please provide the following missing details: {missing_list}."
+            if missing_fields:
+                if disallow_placeholders:
+                    missing_list = ", ".join(field.replace("_", " ") for field in missing_fields) or "additional case details"
+                    ask_text = (
+                        "You requested no placeholders. Please provide the following missing details: "
+                        f"{missing_list}."
+                    )
 
-                await record_response(conversation_id, ask_text, mode="docgen_missing")
-                await _update_summary_with_exchange(conversation_id, state_cache, resolved_query, ask_text)
+                    await record_response(conversation_id, ask_text, mode="docgen_missing")
+                    await _update_summary_with_exchange(conversation_id, state_cache, resolved_query, ask_text)
 
-                async with SessionLocal() as db:
-                    await self.memory.append(db, user_id, conversation_id, "assistant", ask_text)
-                    await db.commit()
+                    async with SessionLocal() as db:
+                        await self.memory.append(db, user_id, conversation_id, "assistant", ask_text)
+                        await db.commit()
 
-                model_general = os.getenv("GENERAL_MODEL", "gpt-4o-mini")
-                latency = int((time.time() - t_start) * 1000)
-                return {
-                    "success": True,
-                    "answer": ask_text,
-                    "answer_markdown": ask_text,
-                    "metadata": {
-                        "mode": "docgen_missing",
-                        "strategy": "docgen",
-                        "kb_hits": 0,
-                        "web_used": False,
-                        "latency_ms": latency,
-                        "conversation_id": conversation_id,
-                        "response_type": "text",
-                        "model": model_general,
-                        "has_doc": False,
-                        "missing_fields": [field.replace("_", " ") for field in missing_fields],
+                    model_general = os.getenv("GENERAL_MODEL", "gpt-4o-mini")
+                    latency = int((time.time() - t_start) * 1000)
+                    return {
+                        "success": True,
+                        "answer": ask_text,
+                        "answer_markdown": ask_text,
+                        "metadata": {
+                            "mode": "docgen_missing",
+                            "strategy": "docgen",
+                            "kb_hits": 0,
+                            "web_used": False,
+                            "latency_ms": latency,
+                            "conversation_id": conversation_id,
+                            "response_type": "text",
+                            "model": model_general,
+                            "has_doc": False,
+                            "missing_fields": [field.replace("_", " ") for field in missing_fields],
+                        }
                     }
-                }
+
+                # Default: auto-fill placeholders and continue.
+                placeholders = True
+                for field in missing_fields:
+                    placeholder_value = f"[PLACEHOLDER: {field.upper()}]"
+                    docgen_context_fields[field] = placeholder_value
+                state_cache.doc_fields = docgen_context_fields
+                logger.info(
+                    "[docgen-placeholders] Auto-filled placeholders for missing fields: %s",
+                    ", ".join(missing_fields),
+                )
 
         # Chit-chat short-circuit: handle greetings/meta queries instantly (use resolved query)
         if is_smalltalk_or_capability(resolved_query):

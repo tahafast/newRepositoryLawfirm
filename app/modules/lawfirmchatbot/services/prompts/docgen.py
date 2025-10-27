@@ -66,6 +66,6 @@ def build_docgen_prompt(
         f"DETAILS:\n{details}\n\n"
         "REFERENCE DOCUMENTS (use their structure, tone, and style as guidance):\n"
         f"{refs}\n\n"
-        "If facts are missing, insert [PLACEHOLDER] and keep the document structure intact.\n"
-        "Do not fabricate names, dates, or case numbers; prefer placeholders instead."
+        "If any fact or field is missing, insert a clear placeholder like [PLACEHOLDER: CASE_TITLE] and keep the structure intact.\n"
+        "Do not fabricate names, dates, or case numbers. Only omit placeholders if the user explicitly said they do not want them."
     )
