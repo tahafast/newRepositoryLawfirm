@@ -8,7 +8,15 @@ import os
 import re
 
 from app.modules.lawfirmchatbot.services.ingestion.document_processor import process_document
-from app.modules.lawfirmchatbot.services.retrieval.vector_search import add_documents_to_vector_store, search_similar_documents, normalize_hits, build_user_prompt, VectorSearch
+from app.modules.lawfirmchatbot.services.retrieval.vector_search import (
+    add_documents_to_vector_store,
+    search_similar_documents,
+    normalize_hits,
+    build_user_prompt,
+    VectorSearch,
+    semantic_search_ephemeral,
+    ephemeral_scroll_for_conversation,
+)
 from app.modules.lawfirmchatbot.services.llm import chat_completion, looks_like_citations_only, run_llm_chat, embed_text_async
 from app.modules.lawfirmchatbot.schema.query import QueryResponse, DebugInfo, DebugQueryAnalysis
 from app.modules.lawfirmchatbot.services.query_analyzer import QueryComplexityAnalyzer, is_docgen_request
@@ -36,7 +44,6 @@ from app.modules.lawfirmchatbot.services.qdrant_collections import get_ephemeral
 from app.modules.lawfirmchatbot.services.document_service import render_html_document, extract_case_info
 from app.modules.lawfirmchatbot.services.ephemeral_store import (
     collection_exists as ephemeral_collection_exists,
-    search as search_ephemeral,
 )
 from app.modules.lawfirmchatbot.services._lc_compat import ensure_OpenAIEmbeddings, ensure_Document
 from app.services.LLM.config import get_llm_settings
@@ -334,7 +341,12 @@ def should_use_retriever(mode: str, user_query: str) -> bool:
     return False
 
 
-def _collect_ephemeral_fallback_text(qdrant_client, conversation_id: str, file_ids: List[str], max_chars: int = 4000) -> str:
+async def _collect_ephemeral_fallback_text(
+    qdrant_client,
+    conversation_id: str,
+    file_ids: List[str],
+    max_chars: int = 4000,
+) -> str:
     """
     Collect raw text from ephemeral collection as fallback when similarity scores are too low.
     This ensures we ALWAYS have context from attached documents when they exist.
@@ -348,27 +360,18 @@ def _collect_ephemeral_fallback_text(qdrant_client, conversation_id: str, file_i
     Returns:
         Concatenated text from ephemeral chunks
     """
-    from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
-    
     try:
-        # Build filter
-        conditions = [FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))]
-        if file_ids:
-            conditions.append(FieldCondition(key="file_id", match=MatchAny(any=file_ids)))
-        
-        # Scroll to collect text
-        res = qdrant_client.scroll(
-            collection_name=EPHEMERAL_COLLECTION,
-            scroll_filter=Filter(must=conditions),
+        points = await ephemeral_scroll_for_conversation(
+            qdrant_client,
+            conversation_id,
+            file_ids=file_ids,
             limit=512,
-            with_payload=True,
-            with_vectors=False,
         )
         
         text_parts = []
         total_len = 0
         
-        for point in res[0]:
+        for point in points:
             payload = getattr(point, 'payload', {}) or {}
             text = payload.get("text") or payload.get("chunk") or payload.get("page_content") or ""
             
@@ -1312,10 +1315,11 @@ Ask specific questions about your documents, request comparisons between concept
                     if ephemeral_collection_exists(conversation_id):
                         has_ephemeral = True
                         eph_start = time.time()
-                        eph_hits = search_ephemeral(
+                        eph_hits = await semantic_search_ephemeral(
+                            qdrant,
+                            query_embedding,
+                            max(8, k),  # Get more ephemeral candidates
                             conversation_id=conversation_id,
-                            query_embedding=query_embedding,
-                            limit=max(8, k),  # Get more ephemeral candidates
                         )
                         t_qdrant_search += time.time() - eph_start
 
@@ -1323,7 +1327,7 @@ Ask specific questions about your documents, request comparisons between concept
                             text = (hit.get("text") or "").strip()
                             if not text:
                                 continue
-                            payload = hit.get("payload") or {}
+                            payload = hit.get("metadata") or hit.get("payload") or {}
                             payload_file_id = payload.get("file_id") or payload.get("doc_id")
                             if filter_file_ids and payload_file_id not in filter_file_ids:
                                 continue
@@ -1402,7 +1406,9 @@ Ask specific questions about your documents, request comparisons between concept
             # CRITICAL FALLBACK: If no chunks found but ephemerals exist, collect raw text
             if not initial_chunks and has_ephemeral and conversation_id:
                 logger.warning(f"[ephemeral-fallback] No chunks retrieved but ephemerals exist - collecting raw text")
-                fallback_text = _collect_ephemeral_fallback_text(qdrant, conversation_id, filter_file_ids, max_chars=4000)
+                fallback_text = await _collect_ephemeral_fallback_text(
+                    qdrant, conversation_id, filter_file_ids, max_chars=4000
+                )
                 
                 if fallback_text:
                     # Create synthetic chunk from fallback text

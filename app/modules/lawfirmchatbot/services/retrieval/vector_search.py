@@ -124,6 +124,117 @@ def normalize_hits(hits: t.Sequence) -> list[dict]:
     return out
 
 
+def _search_one_collection(
+    client,
+    collection_name: str,
+    query_vec: Sequence[float],
+    top_k: int,
+    conversation_id: Optional[str] = None,
+) -> List[dict]:
+    """Search a single Qdrant collection and return normalized hits."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+    try:
+        search_kwargs = {
+            "collection_name": collection_name,
+            "query_vector": list(query_vec),
+            "limit": top_k,
+            "with_payload": True,
+            "with_vectors": False,
+        }
+        if conversation_id:
+            search_kwargs["query_filter"] = Filter(
+                must=[
+                    FieldCondition(
+                        key="conversation_id",
+                        match=MatchValue(value=conversation_id),
+                    )
+                ]
+            )
+        res = client.search(**search_kwargs)
+        return normalize_hits(res)
+    except Exception as exc:
+        logger.error(
+            "[vector-search] Failed single-collection search (%s): %s",
+            collection_name,
+            exc,
+            exc_info=True,
+        )
+        return []
+
+
+def _scroll_one_collection(
+    client,
+    collection_name: str,
+    conversation_id: str,
+    *,
+    file_ids: Optional[List[str]] = None,
+    limit: int = 512,
+) -> List:
+    """Scroll a single Qdrant collection and return raw points."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+
+    try:
+        conditions = [
+            FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))
+        ]
+        if file_ids:
+            conditions.append(FieldCondition(key="file_id", match=MatchAny(any=file_ids)))
+
+        res = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=conditions),
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        points = res[0] if isinstance(res, tuple) else getattr(res, "points", res)
+        return list(points or [])
+    except Exception as exc:
+        logger.error(
+            "[vector-search] Failed collection scroll (%s): %s",
+            collection_name,
+            exc,
+            exc_info=True,
+        )
+        return []
+
+
+async def semantic_search_ephemeral(
+    client,
+    query_vec: Sequence[float],
+    top_k: int,
+    conversation_id: Optional[str] = None,
+) -> List[dict]:
+    """Wrapper that searches the canonical ephemeral collection."""
+    collection = get_ephemeral_collection()
+    return _search_one_collection(
+        client=client,
+        collection_name=collection,
+        query_vec=query_vec,
+        top_k=top_k,
+        conversation_id=conversation_id,
+    )
+
+
+async def ephemeral_scroll_for_conversation(
+    client,
+    conversation_id: str,
+    *,
+    file_ids: Optional[List[str]] = None,
+    limit: int = 512,
+) -> List:
+    """Wrapper that scrolls the canonical ephemeral collection."""
+    collection = get_ephemeral_collection()
+    return _scroll_one_collection(
+        client=client,
+        collection_name=collection,
+        conversation_id=conversation_id,
+        file_ids=file_ids,
+        limit=limit,
+    )
+
+
 def _deduplicate_chunks(chunks: list[dict]) -> tuple[list[dict], list[str], list[int]]:
     """
     Deduplicate chunks by (document_id, page_number) and return clean results.
