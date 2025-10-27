@@ -1,10 +1,9 @@
 """Robust document processing service for PDF, DOCX, DOC, and TXT files."""
 
 from typing import List, Optional
-from app.modules.lawfirmchatbot.services._lc_compat import (
-    ensure_Document,
-    get_recursive_splitter,
-)
+from app.modules.lawfirmchatbot.services._lc_compat import ensure_Document, get_recursive_splitter
+from app.modules.lawfirmchatbot.services.text_cleaner import clean_and_validate_text
+import io
 import math
 import logging
 import os
@@ -57,9 +56,22 @@ def process_document(file_path: str, filename: str, chunk_size: int = 1000) -> L
         text = _extract_text_safe(file_path)
         if not text or not text.strip():
             raise ValueError(f"No text content extracted from {filename}")
-        
+
         # Clean problematic Unicode characters
         text = _clean_unicode_text(text)
+
+        # Run environment-aware cleaning before chunking
+        cleaned_text, clean_meta = clean_and_validate_text(text, filename=filename)
+        if not clean_meta.get("kept", False):
+            logger.warning(
+                "[document-processor] Skipping embedding for %s (quality=%s, alpha=%.2f, removed=%.2f)",
+                filename,
+                clean_meta.get("quality"),
+                clean_meta.get("alpha_ratio", 0.0),
+                clean_meta.get("removed_ratio", 0.0),
+            )
+            return []
+        text = cleaned_text
         
         # Get page count
         total_pages = _get_page_count_safe(file_path)
@@ -81,9 +93,16 @@ def process_document(file_path: str, filename: str, chunk_size: int = 1000) -> L
                 "source": filename,
                 "total_pages": total_pages,
                 "page": 1,
-                "file_type": Path(filename).suffix.lower()
+                "file_type": Path(filename).suffix.lower(),
+                "clean_version": clean_meta.get("clean_version"),
+                "clean_quality": clean_meta.get("quality"),
+                "clean_removed_ratio": clean_meta.get("removed_ratio"),
+                "clean_alpha_ratio": clean_meta.get("alpha_ratio"),
             }]
         )
+
+        for chunk in chunks:
+            chunk.page_content = chunk.page_content.strip()
         
         # Distribute chunks across pages
         _assign_page_numbers(chunks, text, total_pages)
@@ -171,6 +190,23 @@ def _extract_from_doc_safe(file_path: str) -> str:
     except Exception as e:
         logger.error(f"DOC extraction failed: {e}")
         raise
+
+    # Try textract first (covers legacy encodings / embedded fonts)
+    try:
+        import textract  # type: ignore
+
+        textract_bytes = textract.process(io.BytesIO(raw_bytes), extension="doc")
+        if isinstance(textract_bytes, bytes):
+            textract_text = textract_bytes.decode("utf-8", "ignore")
+        else:
+            textract_text = str(textract_bytes or "")
+        textract_text = _clean_doc_binary_text(textract_text)
+        if textract_text.strip():
+            return textract_text
+    except ImportError:
+        pass
+    except Exception as tex_err:
+        logger.warning(f"textract DOC extraction failed: {tex_err}")
 
     stripped = raw_bytes.lstrip()
 

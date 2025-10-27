@@ -26,6 +26,11 @@ You are BRAG AI — a legal research & drafting copilot.
 
 """).strip()
 
+ATTACHMENT_HINT = (
+    "Focus entirely on the attached document content and do not include references "
+    "to other cases or unrelated documents."
+)
+
 
 def build_system_prompt(priority_context: str) -> str:
     """
@@ -62,7 +67,11 @@ def generate_priority_context(ephemeral_chunks: list, has_ephemeral: bool = Fals
     
     if chunk_summaries:
         summaries_text = "\n".join(chunk_summaries)
-        return f"ATTACHED FILES AVAILABLE - prioritize these for answers:\n{summaries_text}\n\nBias toward QA mode unless user explicitly asks to draft/generate/format."
+        return (
+            f"{ATTACHMENT_HINT}\n\n"
+            f"ATTACHED FILES AVAILABLE - prioritize these for answers:\n{summaries_text}\n\n"
+            "Bias toward QA mode unless user explicitly asks to draft/generate/format."
+        )
     else:
         return "Always consider law_docs_v1 (main db)."
 
@@ -95,6 +104,9 @@ def generate_priority_context_from_qdrant(
     )
     
     if ephemeral_context:
-        return ephemeral_context + "Bias toward QA mode unless user explicitly asks to draft/generate/format."
+        return (
+            f"{ATTACHMENT_HINT}\n\n{ephemeral_context}"
+            "\nBias toward QA mode unless user explicitly asks to draft/generate/format."
+        )
     else:
         return "Always consider law_docs_v1 (main db)."

@@ -11,6 +11,7 @@ from qdrant_client.http import models as qmodels
 
 from core.config import settings
 from app.modules.lawfirmchatbot.services.llm import embed_text
+from app.modules.lawfirmchatbot.services.text_cleaner import CLEAN_PIPELINE_VERSION
 
 try:  # Prefer a pre-wired Qdrant client if available
     from app.core.qdrant import qdrant_client  # type: ignore
@@ -189,15 +190,34 @@ def upsert_document(
     file_name: Optional[str],
     chunker: Callable[[str], List[str]],
     embedder: Optional[Callable[[List[str]], List[List[float]]]] = None,
+    clean_metadata: Optional[Dict[str, object]] = None,
+    doc_id: Optional[str] = None,
+    pipeline_version: Optional[int] = None,
 ) -> Tuple[str, int, str]:
     collection = create_collection_if_not_exists()
     client = _client()
 
+    clean_metadata = clean_metadata or {}
+    quality = str(clean_metadata.get("quality", "ok"))
+    clean_version = clean_metadata.get("clean_version") or CLEAN_PIPELINE_VERSION
+    removed_ratio = clean_metadata.get("clean_removed_ratio", clean_metadata.get("removed_ratio"))
+    alpha_ratio = clean_metadata.get("clean_alpha_ratio", clean_metadata.get("alpha_ratio"))
+    clean_stats = clean_metadata.get("clean_stats")
+    pipeline_version = pipeline_version if pipeline_version is not None else clean_metadata.get("pipeline_version")
+    doc_digest = clean_metadata.get("digest")
+
     raw_chunks = chunker(text)
-    chunks = [chunk for chunk in raw_chunks if isinstance(chunk, str) and chunk.strip()]
+    chunks = []
+    for chunk in raw_chunks:
+        if not isinstance(chunk, str):
+            continue
+        trimmed = chunk.strip()
+        if not trimmed:
+            continue
+        chunks.append(trimmed)
     if not chunks:
-        doc_id = str(uuid4())
-        return collection, 0, doc_id
+        fallback_doc_id = doc_id or str(uuid4())
+        return collection, 0, fallback_doc_id
 
     embed_fn = embedder or embed_chunks_batched
     vectors = np.asarray(embed_fn(chunks), dtype=np.float32)
@@ -210,7 +230,7 @@ def upsert_document(
             f"Embedder returned {vectors.shape[0]} vectors but {len(chunks)} chunks were produced."
         )
 
-    doc_id = str(uuid4())
+    doc_id = doc_id or str(uuid4())
     points = []
 
     for idx, (chunk, vector) in enumerate(zip(chunks, vectors)):
@@ -220,11 +240,23 @@ def upsert_document(
             "doc_id": doc_id,
             "file_id": doc_id,  # ADD: alias for autodiscovery compatibility
             "idx": idx,
-            "quality": "ok",  # ADD: quality marker for filtering
+            "quality": quality,
+            "clean_version": clean_version,
         }
+        if pipeline_version is not None:
+            payload["pipeline_version"] = pipeline_version
         if file_name:
             payload["file_name"] = file_name
             payload["filename"] = file_name  # ADD: both variants for compatibility
+        if removed_ratio is not None:
+            payload["clean_removed_ratio"] = removed_ratio
+        if alpha_ratio is not None:
+            payload["clean_alpha_ratio"] = alpha_ratio
+        if clean_stats is not None:
+            payload["clean_stats"] = clean_stats
+        if doc_digest:
+            payload["digest"] = doc_digest
+
         points.append(
             qmodels.PointStruct(
                 id=str(uuid4()),

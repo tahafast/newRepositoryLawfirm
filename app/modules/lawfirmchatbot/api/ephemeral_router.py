@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import logging
 import os
 from typing import Callable, Dict, List, Optional
 
@@ -23,11 +25,25 @@ from app.modules.lawfirmchatbot.services.ephemeral_store import (
     ephemeral_collection_name,
     upsert_document,
 )
+from app.modules.lawfirmchatbot.services.text_cleaner import (
+    clean_text,
+    normalize_text,
+    looks_garbled,
+    CleanStats,
+)
 
 router = APIRouter(prefix="/api/v1/lawfirm/ephemeral", tags=["Ephemeral Docs"])
 
 # Allowed file extensions (server-side)
 ALLOWED_EXTS = {".pdf", ".doc", ".docx", ".txt"}
+
+# Cleaner toggles (feature flagged for deploy safety)
+ENABLE_TEXT_CLEANER = os.getenv("ENABLE_TEXT_CLEANER", "true").lower() != "false"
+_PIPELINE_ENV_FALLBACK = os.getenv("CLEAN_PIPELINE_VERSION") or os.getenv("TEXT_PIPELINE_VERSSION")
+try:
+    TEXT_PIPELINE_VERSION = int(os.getenv("TEXT_PIPELINE_VERSION", _PIPELINE_ENV_FALLBACK or "2"))
+except ValueError:
+    TEXT_PIPELINE_VERSION = 2
 
 # Dependency hook types
 ChunkerFn = Callable[[str], List[str]]
@@ -78,68 +94,99 @@ def get_embedder() -> EmbedderFn:
     return _default_embedder
 
 
-async def _read_text_from_upload(file: UploadFile) -> str:
+async def _read_text_from_upload(file: UploadFile) -> tuple[str, dict]:
     """
-    Lightweight extractor supporting txt/pdf/docx without adding hard dependencies.
-    Replace via dependency overrides if richer extraction is required.
-    Includes text cleaning to remove binary garbage and unreadable characters.
+    Read upload, extract raw text, and optionally run the cleaner before embedding.
     """
-    from app.modules.lawfirmchatbot.services.text_cleaner import clean_and_validate_text
-    import logging
-    
     logger = logging.getLogger(__name__)
-    filename = (file.filename or "").lower()
-    _, ext = os.path.splitext(filename)
+    original_filename = file.filename or ""
+    ext = os.path.splitext(original_filename.lower())[1]
     if ext not in ALLOWED_EXTS:
         raise HTTPException(
             status_code=415,
             detail="Unsupported file type. Allowed: .pdf, .doc, .docx, .txt",
         )
+
     raw = await file.read()
 
     # Extract raw text based on file type
-    raw_text = ""
-    
-    if filename.endswith(".txt"):
+    if ext == ".txt":
         raw_text = raw.decode(errors="ignore")
-
-    elif filename.endswith(".pdf"):
+    elif ext == ".pdf":
         try:
             import pypdf  # type: ignore
 
             reader = pypdf.PdfReader(io.BytesIO(raw))
             raw_text = "\n".join((page.extract_text() or "") for page in reader.pages)
         except Exception as e:
-            logger.warning(f"PDF extraction failed for {filename}, falling back to raw decode: {e}")
+            logger.warning(f"PDF extraction failed for {original_filename}, falling back to raw decode: {e}")
             raw_text = raw.decode(errors="ignore")
-
-    elif filename.endswith(".docx"):
+    elif ext == ".docx":
         try:
             import docx  # type: ignore
 
             doc = docx.Document(io.BytesIO(raw))
             raw_text = "\n".join(paragraph.text for paragraph in doc.paragraphs)
         except Exception as e:
-            logger.warning(f"DOCX extraction failed for {filename}, falling back to raw decode: {e}")
+            logger.warning(f"DOCX extraction failed for {original_filename}, falling back to raw decode: {e}")
             raw_text = raw.decode(errors="ignore")
-    
-    elif filename.endswith(".doc") and not filename.endswith(".docx"):
-        logger.warning(f"Old .doc file detected ({filename}) — attempting binary-safe extraction.")
+    elif ext == ".doc":
+        logger.warning(f"Old .doc file detected ({original_filename}) - attempting binary-safe extraction.")
         raw_text = raw.decode(errors="ignore")
-    
     else:
         raw_text = raw.decode(errors="ignore")
 
-    # Clean the extracted text to remove binary garbage and detect quality
-    cleaned_text, quality_metadata = clean_and_validate_text(raw_text, filename, mark_garbled=True)
-    
-    # Log quality issues
-    if quality_metadata.get("quality") == "garbled":
-        logger.error(f"[ephemeral-upload] Garbled text detected in {filename} - embeddings may be poor quality")
-    elif quality_metadata.get("quality") == "empty":
-        logger.warning(f"[ephemeral-upload] Empty text extracted from {filename}")
-    
-    return cleaned_text
+    raw_text = raw_text or ""
+
+    clean_meta: Dict[str, object] = {
+        "pipeline_version": TEXT_PIPELINE_VERSION,
+        "clean_version": TEXT_PIPELINE_VERSION,
+        "kept": True,
+    }
+
+    stats: CleanStats | None = None
+
+    if ENABLE_TEXT_CLEANER:
+        cleaned_text, stats = clean_text(raw_text, filename=original_filename)
+        clean_meta["clean_stats"] = stats.__dict__
+        clean_meta["clean_removed_ratio"] = stats.removed_ratio
+        clean_meta["clean_alpha_ratio"] = stats.alpha_ratio
+        if not stats.kept or not cleaned_text.strip():
+            logger.error(
+                "[ephemeral-upload] Cleaner rejected %s (alpha=%.2f, removed=%.2f)",
+                original_filename,
+                stats.alpha_ratio,
+                stats.removed_ratio,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unreadable or corrupted file: {original_filename}",
+            )
+        cleaned_text = normalize_text(cleaned_text)
+        if looks_garbled(cleaned_text):
+            logger.error(f"[ephemeral-upload] Garbled text detected in {original_filename} after cleaning")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unreadable or corrupted file: {original_filename}",
+            )
+        clean_meta["quality"] = "ok"
+    else:
+        cleaned_text = normalize_text(raw_text)
+        clean_meta["clean_stats"] = None
+        clean_meta["clean_removed_ratio"] = None
+        clean_meta["clean_alpha_ratio"] = None
+        clean_meta["quality"] = "unchecked"
+
+    cleaned_text = (cleaned_text or "").strip()
+    if not cleaned_text:
+        logger.warning(f"[ephemeral-upload] No readable text extracted from {original_filename}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unreadable or corrupted file: {original_filename}",
+        )
+
+    return cleaned_text, clean_meta
+
 
 
 @router.post("/upload", response_model=EphemeralUploadResponse)
@@ -187,18 +234,26 @@ async def upload_ephemeral_document(
         await run_in_threadpool(delete_document_by_id, conversation_id, doc_id)
 
     for upload in files:
-        text_content = await _read_text_from_upload(upload)
+        text_content, clean_meta = await _read_text_from_upload(upload)
         if not text_content.strip():
             continue
 
+        digest_input = f"{conversation_id}{upload.filename}{TEXT_PIPELINE_VERSION}"
+        doc_digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()
+        clean_meta["pipeline_version"] = TEXT_PIPELINE_VERSION
+        clean_meta["digest"] = doc_digest
+
         try:
-            collection, chunks, doc_id = await run_in_threadpool(
+            collection, chunks, stored_doc_id = await run_in_threadpool(
                 upsert_document,
                 conversation_id=conversation_id,
                 text=text_content,
                 file_name=upload.filename,
                 chunker=chunker,
                 embedder=embedder,
+                clean_metadata=clean_meta,
+                doc_id=doc_digest,
+                pipeline_version=TEXT_PIPELINE_VERSION,
             )
         except QdrantUnavailable as exc:
             raise HTTPException(
@@ -209,7 +264,7 @@ async def upload_ephemeral_document(
         collection_name = collection
         processed_files.append(
             {
-                "doc_id": doc_id,
+                "doc_id": stored_doc_id,
                 "file_name": upload.filename or "document",
                 "chunks": chunks,
             }

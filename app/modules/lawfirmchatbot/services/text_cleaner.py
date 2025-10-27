@@ -1,147 +1,179 @@
+"""
+Context:
+This cleaner runs before embeddings to ensure Qdrant never receives binary junk
+or legacy DOC encoding artifacts. It is environment-aware and versioned so
+prod and local extractors stay consistent.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
 import re
 import unicodedata
-import logging
+from dataclasses import dataclass
+from typing import Tuple
 
 logger = logging.getLogger(__name__)
+
+_PIPELINE_VERSION_KEYS = (
+    "CLEAN_PIPELINE_VERSION",
+    "TEXT_PIPELINE_VERSION",
+    "TEXT_PIPELINE_VERSSION",  # legacy typo
+)
+for _key in _PIPELINE_VERSION_KEYS:
+    _val = os.getenv(_key)
+    if _val:
+        CLEAN_PIPELINE_VERSION = _val
+        break
+else:
+    CLEAN_PIPELINE_VERSION = "lawfirm-cleaner-v1"
 
 # Keep \t, \n, \r but remove other control characters
 NON_PRINTABLE = dict.fromkeys(i for i in range(32) if i not in (9, 10, 13))
 
 
+@dataclass
+class CleanStats:
+    removed_ratio: float
+    alpha_ratio: float
+    kept: bool
+
+
+def clean_text(raw_text: str, filename: str = "") -> Tuple[str, CleanStats]:
+    """Return cleaned text + metadata. Never breaks logic if cleaner is off."""
+    if not raw_text:
+        return "", CleanStats(0.0, 0.0, False)
+
+    alpha_threshold = float(os.getenv("CLEAN_MIN_ALPHA_RATIO", "0.55"))
+    min_words = int(os.getenv("CLEAN_MIN_WORDS", "12"))
+
+    text = re.sub(r"[\x00-\x1F\x7F]", " ", raw_text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    alpha_ratio = sum(c.isalpha() for c in text) / max(1, len(text))
+    words = len(text.split())
+    kept = alpha_ratio >= alpha_threshold and words >= min_words
+
+    removed_ratio = 1 - (len(text) / max(1, len(raw_text)))
+    if removed_ratio > 0.25:
+        logger.warning(f"[cleaner] {filename}: removed {removed_ratio*100:.1f}% junk")
+    if not kept:
+        logger.warning(
+            f"[cleaner] {filename}: rejected (alpha={alpha_ratio:.2f}, words={words})"
+        )
+
+    return (text if kept else ""), CleanStats(removed_ratio, alpha_ratio, kept)
+
+
 def normalize_text(text: str) -> str:
     """
     Normalize text with proper Unicode handling and smart punctuation replacement.
-    
-    Args:
-        text: Raw text to normalize
-        
-    Returns:
-        Normalized text with cleaned punctuation and whitespace
     """
     if not text:
         return ""
-    
-    # Unicode normalize & keep punctuation
+
     text = unicodedata.normalize("NFKC", text)
-    
-    # Remove control characters (keep tab, newline, carriage return)
     text = text.translate(NON_PRINTABLE)
-    
-    # Replace common Word smart characters with ASCII equivalents
+
     replacements = {
-        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",  # various dashes
-        "\u2018": "'", "\u2019": "'",  # smart single quotes
-        "\u201C": '"', "\u201D": '"',  # smart double quotes
-        "\u2026": "...",  # ellipsis
+        "\u2010": "-",  # hyphen
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201C": '"',
+        "\u201D": '"',
+        "\u2026": "...",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
-    
-    # Collapse excessive whitespace but keep paragraphs
+
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    
+
     return text.strip()
 
 
 def looks_garbled(text: str) -> bool:
     """
     Detect if text is garbled/unreadable binary garbage.
-    
-    Uses two criteria:
-    1. Printable ratio: percentage of printable characters
-    2. Alphabetic density: percentage of actual letters
-    
-    Args:
-        text: Text to check
-        
-    Returns:
-        True if text appears to be garbled, False if readable
     """
     if not text:
         return True
-    
-    # Calculate printable ratio
+
     printable = sum(ch.isprintable() for ch in text)
     printable_ratio = printable / max(1, len(text))
-    
-    # Calculate alphabetic density
+
     alpha = sum(ch.isalpha() for ch in text)
     alpha_ratio = alpha / max(1, len(text))
-    
-    # "garbled" only if BOTH look bad
+
     is_garbled = printable_ratio < 0.90 and alpha_ratio < 0.40
-    
+
     if is_garbled:
         logger.warning(
-            f"[text-cleaner] Detected garbled text: "
+            "[text-cleaner] Detected garbled text: "
             f"printable_ratio={printable_ratio:.2f}, alpha_ratio={alpha_ratio:.2f}"
         )
-    
+
     return is_garbled
 
 
-def clean_extracted_text(text: str) -> str:
+def clean_extracted_text(text: str, filename: str = "") -> str:
     """
-    Cleans extracted document text to remove unreadable symbols,
-    control characters, binary junk, and extra spaces.
-    Preserves meaningful punctuation and structure.
+    Clean extracted text and return safe, normalized content.
     """
-
-    if not text:
+    cleaned, stats = clean_text(text, filename)
+    if not stats.kept:
         return ""
-
-    # Use improved normalization
-    text = normalize_text(text)
-
-    # Remove repeating junk characters (�, nulls, weird sequences)
-    text = re.sub(r"[�•□■▪▫¤◆◇◈○●◊⬜⬛⬤■□▀▄█]+", " ", text)
-
-    # Collapse multiple spaces
-    text = re.sub(r"\s{2,}", " ", text).strip()
-
-    return text
+    return normalize_text(cleaned)
 
 
-def clean_and_validate_text(text: str, filename: str = "", mark_garbled: bool = True) -> tuple[str, dict]:
+def clean_and_validate_text(
+    text: str,
+    filename: str = "",
+    mark_garbled: bool = True,
+) -> tuple[str, dict]:
     """
     Enhanced cleaning with garbled detection and quality metadata.
-    
-    Args:
-        text: Raw extracted text
-        filename: Optional filename for logging context
-        mark_garbled: Whether to detect and mark garbled text
-        
-    Returns:
-        Tuple of (cleaned_text, metadata_dict)
-        metadata_dict contains "quality": "ok" | "garbled" | "empty"
     """
-    metadata = {"quality": "ok"}
-    
+    metadata = {
+        "quality": "ok",
+        "clean_version": CLEAN_PIPELINE_VERSION,
+    }
+
     if not text:
         logger.warning(f"Empty text received for file: {filename}")
         metadata["quality"] = "empty"
+        metadata["kept"] = False
         return "", metadata
-    
-    original_length = len(text)
-    cleaned_text = clean_extracted_text(text)
-    cleaned_length = len(cleaned_text)
-    
-    # Check if cleaned text looks garbled
-    if mark_garbled and looks_garbled(cleaned_text):
+
+    cleaned_raw, stats = clean_text(text, filename)
+    metadata.update(
+        {
+            "alpha_ratio": stats.alpha_ratio,
+            "removed_ratio": stats.removed_ratio,
+            "kept": stats.kept,
+        }
+    )
+
+    if not stats.kept:
+        metadata["quality"] = "garbled"
+        return "", metadata
+
+    cleaned = normalize_text(cleaned_raw)
+    if not cleaned:
+        metadata["quality"] = "empty"
+        metadata["kept"] = False
+        return "", metadata
+
+    if mark_garbled and looks_garbled(cleaned):
         logger.warning(f"Garbled text detected for {filename}: text appears unreadable")
         metadata["quality"] = "garbled"
-        # Still return the text, but mark it so caller can decide what to do
-    
-    # Log significant cleanup (indicates potential issues with extraction)
-    if original_length > 0:
-        cleanup_ratio = (original_length - cleaned_length) / original_length
-        if cleanup_ratio > 0.5:  # More than 50% removed
-            logger.warning(
-                f"Significant text cleanup for {filename}: "
-                f"removed {cleanup_ratio*100:.1f}% of content "
-                f"({original_length} -> {cleaned_length} chars)"
-            )
-        metadata["cleanup_ratio"] = cleanup_ratio
-    
-    return cleaned_text, metadata
+        metadata["kept"] = False
+        return "", metadata
+
+    metadata["cleanup_ratio"] = stats.removed_ratio
+    return cleaned, metadata

@@ -36,6 +36,7 @@ pypdf>=4.2.0     # lightweight PDF text extract (best-effort fallback)
 python-docx>=1.1.2  # DOCX extraction support
 qdrant-client>=1.8.0
 striprtf>=0.0.26
+textract>=1.6.5  # legacy DOC fallback extraction
 
 # OpenAI Python SDK (needed when using langchain-openai)
 openai>=1.30.0

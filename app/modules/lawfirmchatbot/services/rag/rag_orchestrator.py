@@ -21,7 +21,8 @@ from app.services.memory.db import SessionLocal
 from app.services.memory.memory_manager import ChatMemoryManager
 from app.services.memory.coref_resolver import resolve_coref
 from app.modules.lawfirmchatbot.services.prompts.docgen import get_docgen_prompt, build_docgen_prompt
-from app.modules.lawfirmchatbot.services.prompts import build_system_prompt, generate_priority_context
+from app.modules.lawfirmchatbot.services.prompts import build_system_prompt
+from app.modules.lawfirmchatbot.services.prompts.system_prompt import ATTACHMENT_HINT
 from app.modules.lawfirmchatbot.services.ephemeral_priority import fetch_ephemeral_priority_context
 from app.modules.lawfirmchatbot.services.intent_router import decide_intent
 from qdrant_client import QdrantClient
@@ -115,6 +116,33 @@ def _latest_ephemeral_file_ids(qdrant_client, conversation_id: str, limit: int =
     except Exception as e:
         logger.error(f"[ephemeral-autodiscovery] Failed to discover file_ids: {e}", exc_info=True)
         return []
+
+
+def _mentions_attached(query: str) -> bool:
+    if not query:
+        return False
+    lowered = query.lower()
+    direct_terms = [
+        "attached document",
+        "attached file",
+        "this document",
+        "this file",
+        "above document",
+        "above file",
+    ]
+    if any(term in lowered for term in direct_terms):
+        return True
+    return _mentions_attached_text(query)
+
+
+def _has_ephemeral_for_conversation(qdrant_client, conversation_id: str) -> bool:
+    if not conversation_id:
+        return False
+    try:
+        ids = _latest_ephemeral_file_ids(qdrant_client, conversation_id, limit=1)
+        return bool(ids)
+    except Exception:
+        return False
 
 
 def _attachment_scope(user_text: str, eph_files: Sequence[dict], conversation_id: str = None, qdrant_client=None) -> Tuple[Scope, List[str]]:
@@ -945,6 +973,14 @@ INSTRUCTIONS - Follow BRAG AI Rich Markdown format:
             priority_context = "Always consider law_docs_v1 (main db)"
 
         has_ephemeral = priority_context.startswith("Attached file(s) context")
+        mentions_attached = _mentions_attached(resolved_query)
+        discovered_file_ids: List[str] = _latest_ephemeral_file_ids(qdrant, conversation_id, limit=5) if conversation_id else []
+        has_ephemeral_docs = bool(discovered_file_ids)
+        if has_ephemeral_docs:
+            has_ephemeral = True
+        if mentions_attached and has_ephemeral_docs and ATTACHMENT_HINT not in priority_context:
+            priority_context = f"{ATTACHMENT_HINT}\n\n{priority_context}"
+
         intent = decide_intent(resolved_query, has_ephemeral)
 
         # === Patch: Override docgen when user just wants explanation ===
@@ -1224,34 +1260,40 @@ Ask specific questions about your documents, request comparisons between concept
         # === Attachment-Aware Scope Detection with Auto-Discovery ===
         # Determine if user is asking about attached files specifically
         # Pass Qdrant client and conversation_id for auto-discovery of file_ids
-        eph_files = []  # Will be populated from ephemeral collection metadata (TODO: get from UI)
-        qdrant = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
+        eph_files = []  # Will be populated from UI when available
         attachment_scope, filter_file_ids = _attachment_scope(
-            resolved_query, 
-            eph_files, 
+            resolved_query,
+            eph_files,
             conversation_id=conversation_id,
-            qdrant_client=qdrant
+            qdrant_client=qdrant,
         )
+        if mentions_attached and has_ephemeral_docs:
+            attachment_scope = "ephemeral_only"
+            filter_file_ids = discovered_file_ids or filter_file_ids
+            logger.info("[attachment-scope] Attachment mention detected; forcing ephemeral-only scope")
+        elif not filter_file_ids and has_ephemeral_docs:
+            filter_file_ids = discovered_file_ids
+
         logger.info(f"[attachment-scope] Query scope: {attachment_scope}, filter_file_ids: {filter_file_ids}")
         
         # Retrieve more candidates for strategy decision (use resolved query)
         # === Ephemeral-First Retrieval Policy ===
-        # Constants for retrieval thresholds
-        EPHEMERAL_MIN_SCORE = 0.35  # cosine sim threshold for confident ephemeral hits
-        LOW_SCORE_CEILING = 0.30    # below this, ephemeral is too weak
-        ALLOW_MIX_WHEN_LOW = True   # mix with KB only if ephemeral scores are weak
         
         use_retriever = should_use_retriever(detected_mode_label, resolved_query)
         
         # CRITICAL: Never skip retrieval when ephemerals exist or attachment keywords detected
-        has_ephemeral = attachment_scope == "ephemeral_only" or bool(filter_file_ids)
+        has_ephemeral = (
+            has_ephemeral
+            or has_ephemeral_docs
+            or attachment_scope == "ephemeral_only"
+            or bool(filter_file_ids)
+        )
         if has_ephemeral:
             use_retriever = True  # FORCE retrieval when attachments exist
             logger.info(f"[retrieval-gate] FORCING retrieval due to ephemeral presence")
         
         initial_chunks = []
         ephemeral_chunks = []
-        main_kb_chunks = []
         total_hits = 0
         strong_hits = 0
         max_score = 0.0
@@ -1266,6 +1308,7 @@ Ask specific questions about your documents, request comparisons between concept
             if conversation_id:
                 try:
                     if ephemeral_collection_exists(conversation_id):
+                        has_ephemeral = True
                         eph_start = time.time()
                         eph_hits = search_ephemeral(
                             conversation_id=conversation_id,
@@ -1279,6 +1322,9 @@ Ask specific questions about your documents, request comparisons between concept
                             if not text:
                                 continue
                             payload = hit.get("payload") or {}
+                            payload_file_id = payload.get("file_id") or payload.get("doc_id")
+                            if filter_file_ids and payload_file_id not in filter_file_ids:
+                                continue
                             metadata = {
                                 "source": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
                                 "document": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
@@ -1298,84 +1344,45 @@ Ask specific questions about your documents, request comparisons between concept
                         exc,
                     )
             
-            # Step 2: Decide retrieval strategy based on ephemeral quality
-            ephem_scores = [float(ch.metadata.get("similarity_score", 0.0)) for ch in ephemeral_chunks]
-            max_ephem_score = max(ephem_scores) if ephem_scores else 0.0
-            
-            if ephemeral_chunks and max_ephem_score >= EPHEMERAL_MIN_SCORE:
-                # CASE 1: Ephemeral is confident → use ONLY ephemeral (no KB pollution)
+            # Step 2: Enforce dynamic ephemeral priority
+            if ephemeral_chunks:
                 use_only_ephemeral = True
                 initial_chunks = ephemeral_chunks
+                has_ephemeral = True
                 logger.info(
-                    f"[retrieval-policy] EPHEMERAL-ONLY mode: "
-                    f"max_score={max_ephem_score:.3f} >= {EPHEMERAL_MIN_SCORE}, "
-                    f"using {len(ephemeral_chunks)} ephemeral chunks"
-                )
-            elif ephemeral_chunks and max_ephem_score > LOW_SCORE_CEILING:
-                # CASE 2: Ephemeral exists but weak → keep it, add a few KB chunks
-                search_result = await search_similar_documents(resolved_query, k=max(3, k//2), score_threshold=score_thresh)
-                t_qdrant_search += time.time() - t_embed_start
-                
-                if isinstance(search_result, tuple):
-                    main_kb_chunks, _, _ = search_result
-                else:
-                    main_kb_chunks = search_result
-                main_kb_chunks = list(main_kb_chunks or [])
-                
-                # Merge and sort by score
-                initial_chunks = ephemeral_chunks + main_kb_chunks
-                initial_chunks.sort(
-                    key=lambda ch: float(ch.metadata.get("similarity_score", 0.0)),
-                    reverse=True,
-                )
-                initial_chunks = initial_chunks[:k]  # Limit total
-                logger.info(
-                    f"[retrieval-policy] HYBRID mode (weak ephemeral): "
-                    f"max_ephem={max_ephem_score:.3f}, "
-                    f"using {len(ephemeral_chunks)} ephem + {len(main_kb_chunks)} KB chunks"
-                )
-            elif ephemeral_chunks and ALLOW_MIX_WHEN_LOW:
-                # CASE 3: Ephemeral very weak → prefer KB, keep a token ephemeral
-                search_result = await search_similar_documents(resolved_query, k=k, score_threshold=score_thresh)
-                t_qdrant_search += time.time() - t_embed_start
-                
-                if isinstance(search_result, tuple):
-                    main_kb_chunks, _, _ = search_result
-                else:
-                    main_kb_chunks = search_result
-                main_kb_chunks = list(main_kb_chunks or [])
-                
-                # Keep just top ephemeral chunk as context, prioritize KB
-                initial_chunks = main_kb_chunks + ephemeral_chunks[:1]
-                logger.info(
-                    f"[retrieval-policy] KB-FIRST mode (very weak ephemeral): "
-                    f"max_ephem={max_ephem_score:.3f}, "
-                    f"using {len(main_kb_chunks)} KB + 1 ephem chunk"
+                    "[retrieval-policy] Ephemeral priority active - using %d ephemeral chunks and skipping main KB",
+                    len(ephemeral_chunks),
                 )
             else:
-                # CASE 4: No ephemeral or empty → use KB only
-                search_result = await search_similar_documents(resolved_query, k=k, score_threshold=score_thresh)
-                t_qdrant_search = time.time() - t_embed_start
-                
-                if isinstance(search_result, tuple):
-                    initial_chunks, _, _ = search_result
+                if not has_ephemeral:
+                    search_result = await search_similar_documents(
+                        resolved_query,
+                        k=k,
+                        score_threshold=score_thresh,
+                    )
+                    t_qdrant_search = time.time() - t_embed_start
+
+                    if isinstance(search_result, tuple):
+                        initial_chunks, _, _ = search_result
+                    else:
+                        initial_chunks = search_result
+                    initial_chunks = list(initial_chunks or [])
+                    logger.info(
+                        "[retrieval-policy] No ephemeral items available - falling back to main KB (%d chunks)",
+                        len(initial_chunks),
+                    )
                 else:
-                    initial_chunks = search_result
-                initial_chunks = list(initial_chunks or [])
-                logger.info(
-                    f"[retrieval-policy] KB-ONLY mode: no ephemeral chunks, "
-                    f"using {len(initial_chunks)} KB chunks"
-                )
-            
-            # If user explicitly asked about attachment, force ephemeral-only
-            if attachment_scope == "ephemeral_only" and ephemeral_chunks:
+                    initial_chunks = []
+                    logger.warning(
+                        "[retrieval-policy] Ephemeral metadata detected but no readable chunks - skipping main KB"
+                    )
+
+            if attachment_scope == "ephemeral_only" and not use_only_ephemeral:
                 use_only_ephemeral = True
                 initial_chunks = ephemeral_chunks
                 logger.info(
-                    f"[retrieval-policy] FORCED EPHEMERAL-ONLY: "
-                    f"attachment_scope detected, using {len(ephemeral_chunks)} chunks"
+                    "[retrieval-policy] Attachment scope forced ephemeral-only mode even without hits"
                 )
-
             t_embed = t_qdrant_search  # Includes embedding + search time
 
             total_hits = len(initial_chunks)

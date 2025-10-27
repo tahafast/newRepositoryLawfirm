@@ -11,6 +11,7 @@ import typing as t
 Document = ensure_Document()
 
 from app.modules.lawfirmchatbot.services.vector_store import get_qdrant, search_similar, upsert_embeddings
+from app.modules.lawfirmchatbot.services.text_cleaner import CLEAN_PIPELINE_VERSION
 from app.modules.lawfirmchatbot.services.llm import embed_text_async
 from core.config import settings
 from core.utils.perf import profile_stage
@@ -202,13 +203,26 @@ async def add_documents_to_vector_store(documents: List[Document]) -> int:
         
         for i in range(0, len(documents), batch_size):
             batch = documents[i:i + batch_size]
+            sanitized_batch = []
+            for doc in batch:
+                content = (getattr(doc, "page_content", "") or "").strip()
+                if not content:
+                    continue
+                doc.page_content = content
+                if doc.metadata is None:
+                    doc.metadata = {}
+                doc.metadata.setdefault("clean_version", CLEAN_PIPELINE_VERSION)
+                sanitized_batch.append(doc)
+
+            if not sanitized_batch:
+                continue
             batch_num = (i // batch_size) + 1
             total_batches = (len(documents) + batch_size - 1) // batch_size
             
             logger.info(f"Processing document batch {batch_num}/{total_batches} ({len(batch)} documents)")
             
             # Generate embeddings for batch using the optimized function
-            texts = [doc.page_content for doc in batch]
+            texts = [doc.page_content for doc in sanitized_batch]
             try:
                 embeddings = []
                 for text in texts:
@@ -222,7 +236,7 @@ async def add_documents_to_vector_store(documents: List[Document]) -> int:
             
             # Create points
             points = []
-            for doc, embedding in zip(batch, embeddings):
+            for doc, embedding in zip(sanitized_batch, embeddings):
                 points.append(PointStruct(
                     id=str(uuid.uuid4()),
                     vector=embedding,
@@ -491,11 +505,16 @@ class VectorSearch:
         
         logger.info(f"[vector-search] Found {len(eph)} ephemeral results")
         
-        # If scope is ephemeral_only, return only ephemeral results
-        if scope == "ephemeral_only":
-            logger.info(f"[vector-search] Returning ephemeral-only results (no KB)")
+        # If any ephemeral results exist, honor priority and do not query main KB
+        if eph:
+            logger.info("[vector-search] Ephemeral hits found; skipping main KB lookup")
             return eph
-        
+
+        # If scope is ephemeral_only but no hits yet, still skip main KB
+        if scope == "ephemeral_only":
+            logger.info("[vector-search] Ephemeral-only scope with no hits; returning empty list")
+            return eph
+
         # Hybrid mode: also search main KB
         main = await self._search_main(query, limit_main)
         logger.info(f"[vector-search] Found {len(main)} main KB results")

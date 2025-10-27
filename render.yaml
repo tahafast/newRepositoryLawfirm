@@ -13,6 +13,8 @@ services:
         value: "1"             # serves /ui from ./frontend
       - key: LOG_LEVEL
         value: INFO
+      - key: LOG_QDRANT_HTTP
+        value: "0"
       # === Qdrant Cloud (fill these in the dashboard as "From dashboard" if you prefer secrets) ===
       - key: QDRANT_MODE
         value: cloud
@@ -25,11 +27,46 @@ services:
       - key: QDRANT_COLLECTION_ALIAS
         value: law_docs_current
       - key: EPHEMERAL_COLLECTION_PREFIX
-        value: ephemeral_docs
+        value: ephemeral_docs_
       - key: EMBEDDING_DIM
         value: "1536"
       - key: VECTOR_DISTANCE
         value: Cosine
+      - key: ENABLE_TEXT_CLEANER
+        value: "true"
+      - key: TEXT_PIPELINE_VERSION
+        value: "2"
+      - key: TEXT_PIPELINE_VERSSION   # legacy typo retained for compatibility
+        value: "2"
+      - key: CLEAN_PIPELINE_VERSION
+        value: "2"
+      - key: CLEAN_MIN_ALPHA_RATIO
+        value: "0.55"
+      - key: CLEAN_MIN_WORDS
+        value: "12"
+      - key: ATTACHED_DOC_SCOPE
+        value: strict
+      # === LLM configuration ===
+      - key: OPENAI_API_KEY
+        sync: from-dashboard
+      - key: QA_MODEL
+        value: gpt-4o-mini
+      - key: DOCGEN_MODEL
+        value: gpt-4o
+      - key: QA_MAX_TOKENS
+        value: "900"
+      - key: DOCGEN_MAX_TOKENS
+        value: "5200"
+      - key: DOCGEN_TOP_K
+        value: "12"
+      - key: DOCGEN_CONTEXT_CHARS
+        value: "16000"
+      - key: RAG_TOP_K
+        value: "6"
+      - key: RAG_MIN_SCORE
+        value: "0.18"
+      - key: KB_TOP_K
+        value: "6"
       # Optional web search
       - key: TAVILY_API_KEY
         sync: from-dashboard
