@@ -27,7 +27,7 @@ services:
       - key: QDRANT_COLLECTION_ALIAS
         value: law_docs_current
       - key: EPHEMERAL_COLLECTION_PREFIX
-        value: ephemeral_docs_
+        value: ephemeral_docs
       - key: EMBEDDING_DIM
         value: "1536"
       - key: VECTOR_DISTANCE
