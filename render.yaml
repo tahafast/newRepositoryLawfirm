@@ -72,3 +72,5 @@ services:
         sync: from-dashboard
       - key: WEB_SEARCH_ENABLED
         value: "true"
+      - key: PORT
+        value: "8000"
