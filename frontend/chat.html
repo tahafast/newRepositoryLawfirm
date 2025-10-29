@@ -578,6 +578,96 @@
     .html-document * {
       color: #000 !important;
     }
+
+    /* === Sidebar Toggle Button === */
+    .sidebar-toggle-btn {
+      font-size: 1.3rem;
+      font-weight: 600;
+      background: rgba(59, 130, 246, 0.15);
+      color: #2563eb;
+      border: none;
+      border-radius: 0.6rem;
+      padding: 0.25rem 0.6rem;
+      cursor: pointer;
+      transition: background 0.2s ease, transform 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .sidebar-toggle-btn:hover {
+      background: rgba(59, 130, 246, 0.25);
+      transform: scale(1.05);
+    }
+
+    @media (max-width: 768px) {
+      .sidebar-toggle-btn {
+        font-size: 1.5rem;
+        position: fixed;
+        bottom: 1rem;
+        right: 1rem;
+        z-index: 100;
+        background: #2563eb;
+        color: #fff;
+        border-radius: 50%;
+        width: 45px;
+        height: 45px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+      }
+    }
+
+    /* === Layout Fix: Sidebar Collapse Expands Chat === */
+    .chat-wrapper {
+      display: flex;
+      width: 100%;
+      height: calc(100vh - 80px);
+      overflow: hidden;
+      transition: all 0.25s ease;
+    }
+
+    .chat-sidebar {
+      width: 280px;
+      flex-shrink: 0;
+      transition: transform 0.25s ease, width 0.25s ease;
+      background: inherit;
+      border-right: 1px solid rgba(0, 0, 0, 0.1);
+    }
+
+    .chat-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      transition: all 0.25s ease;
+      overflow: hidden;
+    }
+
+    .chat-sidebar.is-collapsed {
+      width: 0 !important;
+      transform: translateX(-100%);
+      border: none;
+    }
+
+    .chat-wrapper.sidebar-collapsed .chat-content {
+      flex: 1 1 100%;
+    }
+
+    @media (max-width: 768px) {
+      .chat-sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 280px;
+        transform: translateX(-100%);
+        background: inherit;
+        z-index: 50;
+        box-shadow: 0 0 20px rgba(0, 0, 0, 0.4);
+      }
+
+      .chat-sidebar.is-open {
+        transform: translateX(0);
+      }
+    }
   </style>
 </head>
 <body>
@@ -594,12 +684,22 @@
       <button onclick="__bragaiTheme.toggleTheme()" data-theme-toggle class="theme-toggle border rounded-xl px-3 py-1 text-sm flex items-center">
         &#127769; Dark
       </button>
+      <button id="sidebarToggle"
+              type="button"
+              aria-label="Toggle chat history"
+              aria-expanded="true"
+              aria-controls="chatSidebar"
+              class="sidebar-toggle-btn"
+              title="Toggle History">
+        ☰
+      </button>
     </nav>
   </header>
-
-  <div class="app">
-  <!-- Sidebar -->
-  <aside class="sidebar">
+  <div class="app chat-wrapper">
+    <aside id="chatSidebar"
+         class="sidebar chat-sidebar"
+         role="complementary"
+         aria-label="Chat history">
     <div class="sb-head" style="border-top: 1px solid var(--border); border-bottom: none;">
       <button class="chat-btn primary" id="newChat" style="flex: 1;">+ New Chat</button>
       <button class="chat-btn" id="refreshChats" title="Refresh conversations">Refresh</button>
@@ -608,7 +708,7 @@
   </aside>
 
   <!-- Main chat area -->
-  <main class="main">
+  <main id="chatContent" class="main chat-content">
     <div class="chat-header">
       <h2>Chat</h2>
     </div>
@@ -1858,6 +1958,32 @@
         window.location.href = './index.html';
       }
     });
+  </script>
+
+  <script>
+    (function () {
+      const sidebar = document.getElementById('chatSidebar');
+      const toggleBtn = document.getElementById('sidebarToggle');
+      const wrapper = document.querySelector('.chat-wrapper');
+      const mq = window.matchMedia('(max-width: 768px)');
+
+      if (!sidebar || !toggleBtn || !wrapper) return;
+
+      function isMobile() { return mq.matches; }
+
+      function toggleSidebar() {
+        if (isMobile()) {
+          sidebar.classList.toggle('is-open');
+          toggleBtn.setAttribute('aria-expanded', sidebar.classList.contains('is-open'));
+        } else {
+          sidebar.classList.toggle('is-collapsed');
+          wrapper.classList.toggle('sidebar-collapsed', sidebar.classList.contains('is-collapsed'));
+          toggleBtn.setAttribute('aria-expanded', !sidebar.classList.contains('is-collapsed'));
+        }
+      }
+
+      toggleBtn.addEventListener('click', toggleSidebar);
+    })();
   </script>
   
 </body>
