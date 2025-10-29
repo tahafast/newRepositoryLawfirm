@@ -1,4 +1,3 @@
-
 """Main RAG orchestration service with modular architecture."""
 
 from typing import Dict, Any, Optional, List, Tuple, Literal, Sequence
@@ -211,6 +210,18 @@ def _attachment_scope(user_text: str, eph_files: Sequence[dict], conversation_id
     # default: hybrid (ephemeral prioritized, then main)
     logger.info(f"[attachment-scope] No explicit attachment mention, using hybrid scope")
     return "hybrid", []
+
+
+# === PATCH 2: Conversation-Scoped Retrieval Filter & Dynamic Scope ===
+def _build_ephemeral_filter(conversation_id: str):
+    """
+    Build conversation-scoped filter for ephemeral retrieval.
+    Uses correct Qdrant key-match syntax.
+    """
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    return Filter(
+        must=[FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))]
+    )
 
 
 # === DOCGEN Intent Detection ===
@@ -1397,6 +1408,68 @@ Ask specific questions about your documents, request comparisons between concept
                         conversation_id,
                         exc,
                     )
+            
+            # === PATCH 1: Multi-File Ephemeral Aggregation Logic ===
+            # Build merged filter for all discovered file_ids to ensure comprehensive retrieval
+            if discovered_file_ids and len(discovered_file_ids) > 1 and conversation_id:
+                logger.info(f"[retrieval-policy] Multi-attachment mode: {len(discovered_file_ids)} files detected")
+                
+                try:
+                    from qdrant_client.models import Filter, FieldCondition, MatchValue
+                    
+                    # Build merged filter: conversation_id AND (file_id=f1 OR file_id=f2 OR ...)
+                    merged_filter = Filter(
+                        must=[FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))],
+                        should=[
+                            FieldCondition(key="file_id", match=MatchValue(value=fid))
+                            for fid in discovered_file_ids if fid
+                        ],
+                        min_should_match=1
+                    )
+                    
+                    # Perform consolidated ephemeral search with merged filter
+                    eph_agg_start = time.time()
+                    merged_ephemeral_hits = qdrant.search(
+                        collection_name=EPHEMERAL_COLLECTION,
+                        query_vector=query_embedding,
+                        query_filter=merged_filter,
+                        limit=max(10, k),
+                        with_payload=True,
+                        with_vectors=False
+                    )
+                    t_qdrant_search += time.time() - eph_agg_start
+                    
+                    total_merged_hits = len(merged_ephemeral_hits)
+                    logger.info(
+                        f"[retrieval-policy] Merged ephemeral search: "
+                        f"total_hits={total_merged_hits}, files_considered={len(discovered_file_ids)}"
+                    )
+                    
+                    # Process merged hits and add to ephemeral_chunks
+                    for hit in merged_ephemeral_hits:
+                        text = (hit.payload.get("text") or "").strip() if hit.payload else ""
+                        if not text:
+                            continue
+                        payload = hit.payload or {}
+                        metadata = {
+                            "source": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
+                            "document": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
+                            "page": payload.get("page") or payload.get("page_number") or payload.get("idx"),
+                            "idx": payload.get("idx"),
+                            "file_id": payload.get("file_id") or payload.get("doc_id"),
+                            "conversation_id": payload.get("conversation_id"),
+                            "similarity_score": float(hit.score or 0.0),
+                            "ephemeral": True,
+                        }
+                        ephemeral_chunks.append(Document(page_content=text, metadata=metadata))
+                    
+                    if total_merged_hits > 0:
+                        logger.info(
+                            f"[retrieval-policy] Multi-file aggregation: aggregated_hits={len(ephemeral_chunks)}, "
+                            f"kb_fallback_block=true"
+                        )
+                except Exception as merge_exc:
+                    logger.warning(f"[retrieval-policy] Merged ephemeral search failed: {merge_exc}")
             
             # Step 2: Blend ephemeral context with KB while respecting intent
             ephemeral_hits = len(ephemeral_chunks)

@@ -1,12 +1,12 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
   <meta http-equiv="Pragma" content="no-cache"/>
   <meta http-equiv="Expires" content="0"/>
-  <title>BRAG AI ΓÇö Chat</title>
+  <title>BRAG AI (LEGAL)</title>
   <link rel="stylesheet" href="./styles.css?v=1.1.3"/>
   <script src="./theme.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -678,9 +678,9 @@
       <span class="brand text-lg font-semibold tracking-wide text-gray-900 dark:text-white">BRAG AI (LEGAL)</span>
     </a>
     <nav class="flex items-center space-x-4">
-      <a href="./index.html" class="text-sm font-medium hover:underline">Home</a>
-      <a href="./ingest.html" class="text-sm font-medium hover:underline">Ingest</a>
-      <a href="./chat.html" class="text-sm font-medium hover:underline">Chat</a>
+      <!-- Hidden links; backend still available -->
+      <!-- <a href="./index.html" class="text-sm font-medium hover:underline">Home</a>
+      <a href="./ingest.html" class="text-sm font-medium hover:underline">Ingest</a> -->
       <button onclick="__bragaiTheme.toggleTheme()" data-theme-toggle class="theme-toggle border rounded-xl px-3 py-1 text-sm flex items-center">
         &#127769; Dark
       </button>
@@ -1983,6 +1983,71 @@
       }
 
       toggleBtn.addEventListener('click', toggleSidebar);
+    })();
+  </script>
+
+  <!-- === Hide reference footers / citations (frontend only) === -->
+  <style id="ref-hide-style">
+    /* === FRONTEND: REFERENCE DISPLAY SUPPRESSION (SAFE) === */
+    .chat-message [data-role="references"],
+    .chat-message .references,
+    .chat-message .reference-line,
+    .chat-message .ref-footer,
+    .chat-message .ref-section,
+    .bubble [data-role="references"],
+    .bubble .references,
+    .bubble .reference-line,
+    .bubble .ref-footer {
+      display: none !important;
+      visibility: hidden !important;
+      height: 0 !important;
+      overflow: hidden !important;
+      padding: 0 !important;
+      margin: 0 !important;
+    }
+
+    /* Remove bottom spacing if the last element is hidden */
+    .chat-message > *:last-child,
+    .bubble > *:last-child {
+      margin-bottom: 0.25rem;
+    }
+  </style>
+
+  <script id="ref-hide-script">
+    (function(){
+      const REF_PATTERN = /^(References?:|Referenced from:|Reference pages?:|Document type:)/i;
+
+      function hideRefNodes(root=document) {
+        const elements = root.querySelectorAll(
+          '.chat-message p, .chat-message div, .chat-message span, .chat-message pre, ' +
+          '.bubble p, .bubble div, .bubble span, .bubble pre'
+        );
+        for (const el of elements) {
+          if (!el || el.dataset.refHidden) continue;
+          const text = el.textContent.trim();
+          if (REF_PATTERN.test(text)) {
+            el.style.display = 'none';
+            el.dataset.refHidden = 'true';
+          }
+        }
+      }
+
+      // Initial run
+      hideRefNodes();
+
+      // Watch dynamic insertions (HTMX/stream updates)
+      const observer = new MutationObserver(mutations => {
+        for (const m of mutations) {
+          for (const n of m.addedNodes) {
+            if (n.nodeType === 1) hideRefNodes(n);
+          }
+        }
+      });
+
+      observer.observe(document.body, { childList: true, subtree: true });
+
+      // Light periodic refresh in case of async markdown rendering
+      setInterval(() => hideRefNodes(), 2000);
     })();
   </script>
   

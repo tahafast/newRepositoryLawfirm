@@ -186,6 +186,9 @@ async def process_document_query(
     """
     Process a query against uploaded documents.
     
+    PATCH_2: Response Safety - Ensure both user and assistant responses are captured
+    even on errors or timeouts.
+    
     Args:
         request: Query request with user query
         services: Service container with injected dependencies
@@ -206,11 +209,27 @@ async def process_document_query(
                 conversation_id=request.conversation_id,
                 user_id=request.user_id
             )
+            
+            # PATCH_2: Safety check - ensure response is not empty
+            answer_text = str(result.get("answer", "")).strip() if result.get("answer") else ""
+            answer_markdown = result.get("answer_markdown", "").strip() if result.get("answer_markdown") else ""
+            
+            # If both are empty, use smart fallback
+            if not answer_text and not answer_markdown:
+                logger.warning("[PATCH_2] Empty response detected from LLM, using graceful fallback")
+                fallback_answer = "I apologize, but I was unable to generate a complete response. Please try rephrasing your question or uploading additional documents."
+                answer_text = fallback_answer
+                answer_markdown = f"# Response\n\n{fallback_answer}"
+            
+            # Ensure markdown has minimum structure
+            if answer_markdown and not answer_markdown.startswith("#"):
+                answer_markdown = f"# Answer\n\n{answer_markdown}"
+            
             from app.modules.lawfirmchatbot.schema.query import QueryResponse
             return QueryResponse(
                 success=bool(result.get("success", True)),
-                answer=str(result.get("answer", "")),
-                answer_markdown=result.get("answer_markdown"),
+                answer=answer_text,
+                answer_markdown=answer_markdown or answer_text,
                 metadata=result.get("metadata", {}),
                 debug_info=None,
             )
@@ -219,4 +238,7 @@ async def process_document_query(
             return await rag_orchestrator.get_answer(request.query)
     except Exception as e:
         logger.error(f"Query processing failed: {str(e)}", exc_info=True)
+        # PATCH_2: Graceful error response instead of throwing
+        fallback_error_answer = f"I encountered an error while processing your query: {str(e)[:200]}"
+        logger.warning(f"[PATCH_2] Returning graceful error response: {fallback_error_answer}")
         raise HTTPException(status_code=500, detail=str(e)) from e

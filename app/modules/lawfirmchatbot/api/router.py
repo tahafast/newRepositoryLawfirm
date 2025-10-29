@@ -2,6 +2,7 @@ from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from typing import List, Dict, Any
 from pydantic import BaseModel
 import logging
+import uuid
 
 # Import DTOs only
 from app.modules.lawfirmchatbot.schema.query import QueryRequest, QueryResponse
@@ -32,6 +33,60 @@ v1 = APIRouter(prefix="/api/v1/lawfirm", tags=["Law Firm Chatbot"])
 # @v1.post("/upload-document") ...
 # @v1.post("/query") ...
 router = v1  # optional alias for external imports
+
+
+async def _resolve_conversation_id(
+    conversation_id: str | None,
+    user_id: str,
+    db: AsyncSession
+) -> str:
+    """
+    PATCH_1: Stable conversation_id resolution with fallback to latest open chat.
+    
+    Strategy:
+    1. If conversation_id provided and exists → use it
+    2. If missing → find latest conversation for user
+    3. Else → create new conversation
+    
+    This prevents accidental chat fragmentation from frontend reinit.
+    """
+    if conversation_id:
+        try:
+            conv = await db.get(Conversation, conversation_id)
+            if conv and conv.user_id == user_id:
+                logger.info(f"[PATCH_1] Using existing conversation: {conversation_id}")
+                return conversation_id
+            else:
+                logger.warning(f"[PATCH_1] Conversation {conversation_id} not found or belongs to different user")
+        except Exception as e:
+            logger.warning(f"[PATCH_1] Failed to fetch conversation {conversation_id}: {e}")
+    
+    # Try to find latest conversation for this user
+    from sqlalchemy import select
+    try:
+        q = select(Conversation).where(
+            Conversation.user_id == user_id
+        ).order_by(Conversation.created_at.desc()).limit(1)
+        res = await db.execute(q)
+        rows = res.all()
+        
+        if rows:
+            conv = rows[0][0]
+            logger.info(f"[PATCH_1] Using latest conversation for user {user_id}: {conv.id}")
+            return conv.id
+    except Exception as e:
+        logger.warning(f"[PATCH_1] Failed to find latest conversation: {e}")
+    
+    # No conversation found, create new one
+    try:
+        new_conv = await ensure_conversation(db, user_id, None)
+        await db.flush()
+        logger.info(f"[PATCH_1] Created new conversation: {new_conv.id}")
+        return new_conv.id
+    except Exception as e:
+        logger.error(f"[PATCH_1] Failed to create conversation: {e}")
+        # Fallback: generate UUID
+        return str(uuid.uuid4())
 
 
 @v1.get("/docs/indexed/samples")
@@ -85,17 +140,43 @@ async def upload_document(
 @v1.post("/query", response_model=QueryResponse)
 async def query_document(
     req: QueryRequest,
-    services: Services = Depends(get_legacy_services)
+    services: Services = Depends(get_legacy_services),
+    db: AsyncSession = Depends(get_db)
 ) -> QueryResponse:
-    """Process a query against the uploaded documents."""
+    """
+    Process a query against the uploaded documents.
+    
+    PATCH_1: Stable conversation_id handling - ensures consistent conversation tracking.
+    """
     import time
     start_time = time.time()
-    logger.info(f"Received query request: {req.query[:120]}")
+    
     try:
+        # PATCH_1: Resolve conversation_id with fallback logic
+        resolved_conv_id = await _resolve_conversation_id(
+            conversation_id=req.conversation_id,
+            user_id=req.user_id or "anon",
+            db=db
+        )
+        
+        # Update request with resolved conversation_id
+        req.conversation_id = resolved_conv_id
+        
+        logger.info(f"[PATCH_1] Query with resolved conversation: {resolved_conv_id}, query_len={len(req.query)}")
+        
+        # Process the query
         response = await process_document_query(req, services)
+        
+        # Ensure conversation_id is in metadata for UI coherence
+        if response.metadata:
+            response.metadata["conversation_id"] = resolved_conv_id
+        else:
+            response.metadata = {"conversation_id": resolved_conv_id}
+        
         elapsed_ms = int((time.time() - start_time) * 1000)
-        logger.info(f"Query processed successfully in {elapsed_ms}ms")
+        logger.info(f"[PATCH_1] Query processed successfully in {elapsed_ms}ms with conversation {resolved_conv_id}")
         return response
+    
     except Exception as e:
         logger.error(f"Error processing query: {str(e)}", exc_info=True)
         raise HTTPException(

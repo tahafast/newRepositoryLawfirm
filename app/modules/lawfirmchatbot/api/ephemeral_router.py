@@ -276,6 +276,60 @@ async def upload_ephemeral_document(
             detail="Could not extract any text from the provided files.",
         )
 
+    # === PATCH 1: Conversation-Scoped Cleanup (max 5 attachments per chat) ===
+    try:
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from datetime import datetime
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        qdrant = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
+        
+        # Fetch all points for this conversation
+        collection_name_to_use = collection_name or ephemeral_collection_name(conversation_id)
+        existing_result = qdrant.scroll(
+            collection_name=collection_name_to_use,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))]
+            ),
+            with_payload=True,
+            limit=999
+        )
+        existing_points = existing_result[0] if isinstance(existing_result, tuple) else existing_result
+        
+        # Extract unique file_ids
+        unique_files = {}
+        for p in existing_points:
+            if hasattr(p, 'payload') and p.payload:
+                file_id = p.payload.get("file_id") or p.payload.get("doc_id")
+                if file_id:
+                    # Store point with timestamp for sorting
+                    ts = p.payload.get("ts", "")
+                    if file_id not in unique_files or ts > unique_files[file_id].get("ts", ""):
+                        unique_files[file_id] = {"ts": ts, "point_id": p.id}
+        
+        # If more than 5 unique files, delete oldest ones
+        if len(unique_files) > 5:
+            sorted_files = sorted(unique_files.items(), key=lambda x: x[1].get("ts", ""))
+            files_to_delete = sorted_files[:-5]  # Keep last 5, delete rest
+            
+            for file_id, info in files_to_delete:
+                # Delete all points for this file_id in this conversation
+                qdrant.delete(
+                    collection_name=collection_name_to_use,
+                    points_selector={"filter": Filter(
+                        must=[
+                            FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id)),
+                            FieldCondition(key="file_id", match=MatchValue(value=file_id))
+                        ]
+                    )}
+                )
+            logger.info(f"[ephemeral-cleanup] Trimmed to 5 files for conversation {conversation_id}")
+    except Exception as cleanup_err:
+        logger.warning(f"[ephemeral-cleanup] Failed to enforce max-5 cleanup: {cleanup_err}")
+        # Don't fail the upload due to cleanup failure - log but continue
+
     return EphemeralUploadResponse(
         status="ok",
         collection=collection_name or ephemeral_collection_name(conversation_id),
