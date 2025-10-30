@@ -57,6 +57,117 @@ Document = ensure_Document()
 EPHEMERAL_COLLECTION = get_ephemeral_collection()
 
 
+# === CONFIDENTIAL FACT SANITIZATION & SAFETY LAYER ===
+
+def sanitize_confidential_context(text: str) -> str:
+    """
+    Redact sensitive information from confidential context using regex patterns.
+    Sanitizes names, emails, numeric identifiers, and URLs.
+    
+    Args:
+        text: Text content to sanitize
+        
+    Returns:
+        Sanitized text with sensitive patterns replaced by [REDACTED]
+    """
+    if not text:
+        return text
+    
+    # Pattern 1: Email addresses
+    text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[REDACTED_EMAIL]', text)
+    
+    # Pattern 2: URLs (http, https, www)
+    text = re.sub(r'https?://[^\s]+|www\.[^\s]+', '[REDACTED_URL]', text)
+    
+    # Pattern 3: Phone numbers (various formats)
+    text = re.sub(r'\b(\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}\b', '[REDACTED_PHONE]', text)
+    
+    # Pattern 4: Numeric identifiers (IDs, case numbers, etc.) - 4+ digits
+    # Be careful not to redact page numbers or dates - context-aware
+    text = re.sub(r'\b\d{4,}\b', '[REDACTED_ID]', text)
+    
+    # Pattern 5: Names (capitalized words, 2+ words together) - conservative
+    # Only redact if pattern looks like "FirstName LastName" (2+ capitalized words)
+    # Skip common legal terms, months, days
+    legal_terms = {'Court', 'Judge', 'Plaintiff', 'Defendant', 'Petitioner', 'Respondent', 
+                   'Section', 'Article', 'Act', 'Law', 'Ordinance', 'Code', 'January', 'February',
+                   'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October',
+                   'November', 'December', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
+                   'Saturday', 'Sunday'}
+    # Pattern: Capitalized word followed by space and another capitalized word
+    words = text.split()
+    result_words = []
+    i = 0
+    while i < len(words):
+        word = words[i]
+        # Check if this word and next word form a name pattern
+        if (i + 1 < len(words) and 
+            word[0].isupper() and len(word) > 1 and 
+            words[i+1][0].isupper() and len(words[i+1]) > 1 and
+            word not in legal_terms and words[i+1] not in legal_terms and
+            not word.replace('.', '').isdigit() and not words[i+1].replace('.', '').isdigit()):
+            # Potential name pair - redact
+            result_words.append('[REDACTED_NAME]')
+            i += 2
+        else:
+            result_words.append(word)
+            i += 1
+    text = ' '.join(result_words)
+    
+    # Pattern 6: Addresses (common address patterns)
+    text = re.sub(r'\b(?:House|Street|Road|Avenue|Lane|Drive|Boulevard|Blvd|Rd|St|Ave)\s+[A-Za-z0-9\s,]+', '[REDACTED_ADDRESS]', text, flags=re.IGNORECASE)
+    
+    return text
+
+
+def has_confidential_chunks(chunks: List[Any]) -> bool:
+    """
+    Check if any chunks in the list are marked as confidential.
+    
+    Args:
+        chunks: List of Document objects or dicts with metadata/payload
+        
+    Returns:
+        True if any chunk has confidential flag set to True
+    """
+    for chunk in chunks:
+        # Check metadata first (for Document objects)
+        if hasattr(chunk, 'metadata'):
+            metadata = chunk.metadata or {}
+            if metadata.get("confidential") is True:
+                return True
+        # Check if it's a dict with metadata or payload
+        elif isinstance(chunk, dict):
+            if chunk.get("confidential") is True:
+                return True
+            metadata = chunk.get("metadata", {})
+            if metadata.get("confidential") is True:
+                return True
+            payload = chunk.get("payload", {})
+            if payload.get("confidential") is True:
+                return True
+    
+    return False
+
+
+def get_confidential_warning_prompt() -> str:
+    """
+    Returns the confidentiality safety instruction to append to system prompts.
+    
+    Returns:
+        Confidentiality warning string
+    """
+    return """
+
+IMPORTANT SAFETY NOTE:
+You are handling CONFIDENTIAL legal content. The retrieved context has been sanitized to protect sensitive information.
+- Do NOT output factual details, credentials, or specific opinions from confidential documents.
+- Use placeholders like [REDACTED] where necessary instead of revealing sensitive data.
+- Focus on general legal principles rather than document-specific confidential facts.
+- Never hallucinate or infer sensitive details that were redacted.
+"""
+
+
 # === Attachment-Aware Routing ===
 from typing import Literal, Sequence
 
@@ -1390,6 +1501,8 @@ Ask specific questions about your documents, request comparisons between concept
                             payload_file_id = payload.get("file_id") or payload.get("doc_id")
                             if filter_file_ids and payload_file_id not in filter_file_ids:
                                 continue
+                            # Extract confidential flag from payload
+                            confidential_flag = payload.get("confidential") is True
                             metadata = {
                                 "source": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
                                 "document": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
@@ -1400,6 +1513,7 @@ Ask specific questions about your documents, request comparisons between concept
                                 "conversation_id": payload.get("conversation_id"),
                                 "similarity_score": float(hit.get("score") or 0.0),
                                 "ephemeral": True,
+                                "confidential": confidential_flag,  # Propagate confidential flag
                             }
                             ephemeral_chunks.append(Document(page_content=text, metadata=metadata))
                 except Exception as exc:
@@ -1451,6 +1565,8 @@ Ask specific questions about your documents, request comparisons between concept
                         if not text:
                             continue
                         payload = hit.payload or {}
+                        # Extract confidential flag from payload
+                        confidential_flag = payload.get("confidential") is True
                         metadata = {
                             "source": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
                             "document": payload.get("document") or payload.get("source") or "Ephemeral Attachment",
@@ -1460,6 +1576,7 @@ Ask specific questions about your documents, request comparisons between concept
                             "conversation_id": payload.get("conversation_id"),
                             "similarity_score": float(hit.score or 0.0),
                             "ephemeral": True,
+                            "confidential": confidential_flag,  # Propagate confidential flag
                         }
                         ephemeral_chunks.append(Document(page_content=text, metadata=metadata))
                     
@@ -1562,6 +1679,7 @@ Ask specific questions about your documents, request comparisons between concept
                 
                 if fallback_text:
                     # Create synthetic chunk from fallback text
+                    # Note: Confidential check happens later during context building
                     metadata = {
                         "source": "Attached Document (fallback)",
                         "document": "Attached Document",
@@ -1651,6 +1769,34 @@ Ask specific questions about your documents, request comparisons between concept
             MAX_CHUNK_CHARS = 500  # Trim chunks for speed
             final_chunks = initial_chunks[:6]
         
+        # === CONFIDENTIAL DETECTION & SANITIZATION ===
+        # Check if any chunks are marked as confidential
+        # Need to check both metadata and original payload sources
+        is_confidential = False
+        for ch in final_chunks:
+            # Check metadata (for Document objects from search)
+            metadata = ch.metadata or {}
+            if metadata.get("confidential") is True:
+                is_confidential = True
+                break
+            # Also check if payload metadata has confidential flag
+            # (chunks from search_similar_documents have payload metadata nested)
+            payload_meta = metadata.get("payload_metadata", {})
+            if payload_meta.get("confidential") is True:
+                is_confidential = True
+                break
+        
+        # Also check initial_chunks for ephemeral chunks which may have payload directly
+        if not is_confidential:
+            for ch in initial_chunks:
+                metadata = getattr(ch, 'metadata', {}) or {}
+                if metadata.get("confidential") is True:
+                    is_confidential = True
+                    break
+        
+        if is_confidential:
+            logger.info(f"[confidential-scope] Detected confidential chunks - sanitizing context before LLM call")
+        
         total_context_chars = 0
         
         for i, ch in enumerate(final_chunks, start=1):
@@ -1673,6 +1819,22 @@ Ask specific questions about your documents, request comparisons between concept
                         truncate_at = break_pos + len(break_char)
                         break
                 content = content[:truncate_at].rstrip() + "..."
+            
+            # === SANITIZE CONFIDENTIAL CONTENT ===
+            # Sanitize if chunk is marked confidential or if we detected confidential context
+            chunk_metadata = ch.metadata or {}
+            chunk_is_confidential = (
+                chunk_metadata.get("confidential") is True or
+                chunk_metadata.get("payload_metadata", {}).get("confidential") is True or
+                is_confidential  # Global flag if any chunk is confidential
+            )
+            
+            if chunk_is_confidential:
+                original_len = len(content)
+                content = sanitize_confidential_context(content)
+                sanitized_len = len(content)
+                if original_len != sanitized_len:
+                    logger.info(f"[confidential-scope] Sanitized chunk {i}: {original_len} -> {sanitized_len} chars")
             
             chunk_text = f"{header}\n{content}"
             
@@ -1780,6 +1942,11 @@ Ask specific questions about your documents, request comparisons between concept
         # === System Prompt Construction ===
         # Use the priority context we already fetched above
         system_prompt = build_system_prompt(priority_context)
+        
+        # === CONFIDENTIAL SAFETY: Append warning if confidential chunks detected ===
+        if is_confidential:
+            logger.info(f"[confidential-scope] Appending confidentiality warning to system prompt")
+            system_prompt += get_confidential_warning_prompt()
 
         # ROUTING FREEZE ENFORCEMENT: The intent variable is now frozen and authoritative.
         # NO CODE BELOW THIS POINT should modify the 'intent' variable.

@@ -433,11 +433,18 @@ async def search_similar_documents(query: str, k: int | None = None, score_thres
         class Obj: pass
         o = Obj()
         o.page_content = pl.get("text", "")
+        # Extract confidential flag from payload or metadata
+        confidential_flag = (
+            pl.get("confidential") is True or
+            metadata.get("confidential") is True
+        )
         o.metadata = {
             "source": doc,  # Use 'source' as primary key
             "document": doc,
             "page": page,
-            "similarity_score": float(p.score)
+            "similarity_score": float(p.score),
+            "confidential": confidential_flag,  # Propagate confidential flag
+            "payload_metadata": metadata  # Preserve original metadata for deeper checks
         }
         docs.append(o)
         sources.add(doc)
